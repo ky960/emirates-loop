@@ -1,0 +1,29 @@
+{
+  "name": "emirates-loop",
+  "private": true,
+  "version": "3.0.0",
+  "type": "module",
+  "description": "Indoor ride tracker: ride the Emirates Loop on a real map with Bluetooth speed, cadence and heart-rate sensors.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mapbox/vector-tile": "^2.0.3",
+    "maplibre-gl": "^4.7.1",
+    "pbf": "^4.0.1",
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.160.0",
+    "@types/web-bluetooth": "^0.0.22",
+    "fake-indexeddb": "^6.2.8",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21",
+    "vite-plugin-pwa": "^0.20.5",
+    "vitest": "^2.1.9"
+  }
+}
