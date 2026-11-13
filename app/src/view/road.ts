@@ -11,7 +11,8 @@ import type { Quality, Settings } from "../store/settings";
 import { clamp, D2R, hash01, rng, smoothstep, TAU } from "../util";
 import type { OsmData, OsmTiles } from "./osm";
 import { carGeometry, ghafGeometry, JERSEY, palmCrownGeometry, palmTrunkGeometry, sweep, WBEAM } from "./props";
-import { buildRider, type RiderModel } from "./rider";
+import { loadModels, type Models, type Part } from "./models";
+import { buildModelRider, buildRider, type RiderModel } from "./rider";
 import { barkTexture, blobTexture, facadeTextures, frondTexture, groundDetailTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
 
 type Biome = "desert" | "city" | "mountains" | "oasis" | "flat";
@@ -20,10 +21,11 @@ const UP = V3(0, 1, 0);
 const KX = Math.cos(24.8 * D2R) * 111320, KY = 110574;
 const BIOME_LABEL: Record<Biome, string> = { desert: "Desert highway", city: "City", mountains: "Hajar mountains", oasis: "Al Ain oasis", flat: "Coast" };
 
-const QUALITY: Record<Quality, { grid: number; shadow: number; shadowR: number; dpr: number; buildings: number; palms: number; cars: number; skyline: number }> = {
-  battery: { grid: 100, shadow: 0, shadowR: 0, dpr: 1, buildings: 700, palms: 160, cars: 8, skyline: 0 },
-  balanced: { grid: 150, shadow: 2048, shadowR: 30, dpr: 1.25, buildings: 1800, palms: 300, cars: 18, skyline: 500 },
-  max: { grid: 180, shadow: 4096, shadowR: 42, dpr: 1.6, buildings: 2600, palms: 380, cars: 26, skyline: 900 },
+// palmNear: palms within this many metres ahead use the detailed model; farther ones the light procedural palm.
+const QUALITY: Record<Quality, { grid: number; shadow: number; shadowR: number; dpr: number; buildings: number; palms: number; palmNear: number; cars: number; skyline: number }> = {
+  battery: { grid: 100, shadow: 0, shadowR: 0, dpr: 1, buildings: 700, palms: 160, palmNear: 90, cars: 8, skyline: 0 },
+  balanced: { grid: 150, shadow: 2048, shadowR: 30, dpr: 1.25, buildings: 1800, palms: 300, palmNear: 220, cars: 18, skyline: 500 },
+  max: { grid: 180, shadow: 4096, shadowR: 42, dpr: 1.6, buildings: 2600, palms: 380, palmNear: 380, cars: 26, skyline: 900 },
 };
 /** Horizon haze: fog and the far ground fade into the sky colour so there is no hard edge. */
 const HAZE = 0xdcd2c2;
@@ -158,6 +160,49 @@ interface Win {
   profile: ElevationProfile;
   biome: Biome;
   label: string;
+  palms: PalmLod | null;
+}
+
+/** One palm: a detailed-model transform for close range and trunk/crown transforms for the procedural palm. */
+interface Palm { p: THREE.Vector3; model: THREE.Matrix4; trunk: THREE.Matrix4; crown: THREE.Matrix4 }
+
+/**
+ * Palms near the rider use the detailed model; the rest use the light procedural palm.
+ * The split is refreshed a few times a second as the rider moves, so only a few dozen detailed palms are ever drawn.
+ */
+class PalmLod {
+  private near: THREE.InstancedMesh[] = [];
+  private far: THREE.InstancedMesh[];
+  private acc = 1;
+  private d = new THREE.Vector3();
+  constructor(private palms: Palm[], private range: number, group: THREE.Group) {
+    const n = palms.length;
+    const mk = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
+      const im = new THREE.InstancedMesh(geo, mat, n);
+      im.castShadow = im.receiveShadow = true;
+      im.frustumCulled = false;
+      im.count = 0;
+      group.add(im);
+      return im;
+    };
+    this.far = [mk(GEO.trunk, MAT.trunk), mk(GEO.crown, MAT.frond)];
+    if (MODELS?.palm && range > 0) this.near = MODELS.palm.map((p) => mk(p.geo, p.mat));
+  }
+  update(dt: number, at: THREE.Vector3, fwd: THREE.Vector3) {
+    this.acc += dt;
+    if (this.acc < 0.3) return;
+    this.acc = 0;
+    let nn = 0, nf = 0;
+    const R2 = this.range * this.range;
+    for (const pm of this.palms) {
+      this.d.subVectors(pm.p, at);
+      const q = this.d.x * this.d.x + this.d.z * this.d.z, ahead = this.d.x * fwd.x + this.d.z * fwd.z;
+      if (this.near.length && q < R2 && ahead > -25) { for (const im of this.near) im.setMatrixAt(nn, pm.model); nn++; }
+      else { this.far[0].setMatrixAt(nf, pm.trunk); this.far[1].setMatrixAt(nf, pm.crown); nf++; }
+    }
+    for (const im of this.near) { im.count = nn; im.instanceMatrix.needsUpdate = true; }
+    for (const im of this.far) { im.count = nf; im.instanceMatrix.needsUpdate = true; }
+  }
 }
 
 // ---------- shared materials ----------
@@ -251,7 +296,13 @@ function makeShared() {
   GEO.shrub = new THREE.IcosahedronGeometry(1, 0);
   GEO.rock = new THREE.DodecahedronGeometry(1, 0);
 }
-const SHARED_GEOS = () => new Set(Object.values(GEO));
+/** Loaded 3D models (null until they arrive); their geometries are shared across windows. */
+let MODELS: Models | null = null;
+const SHARED_GEOS = () => {
+  const s = new Set(Object.values(GEO));
+  MODELS?.palm?.forEach((p) => s.add(p.geo));
+  return s;
+};
 let groundDetail: THREE.Texture | null = null;
 /** Shared terrain detail map, tiled every ~70 m over the 4.4 km terrain patch. */
 const GROUND_DETAIL = () => {
@@ -333,31 +384,51 @@ class Traffic {
   private e = new THREE.Euler();
   private zero = new THREE.Matrix4().makeScale(0, 0, 0);
 
+  private owned: THREE.BufferGeometry[] = [];
+
+  /** Uses the detailed car models (sedan, SUV) once loaded, otherwise simple built-in shapes. */
   constructor(n: number) {
-    const body = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.5, roughness: 0.3, envMapIntensity: 0.9 });
-    const glass = new THREE.MeshStandardMaterial({ color: 0x141b22, metalness: 0.8, roughness: 0.08 });
-    const wheel = new THREE.MeshStandardMaterial({ color: 0x18191b, roughness: 0.85 });
-    const tail = new THREE.MeshStandardMaterial({ color: 0x5a0a0a, emissive: new THREE.Color(0xff2a1a), emissiveIntensity: 1.2 });
-    const head = new THREE.MeshStandardMaterial({ color: 0xdddddd, emissive: new THREE.Color(0xfff6e0), emissiveIntensity: 1.4 });
-    const mats = [body, glass, wheel, tail, head];
-    const per = [Math.ceil(n * 0.6), n - Math.ceil(n * 0.6)];
-    (["sedan", "suv"] as const).forEach((kind, ki) => {
-      const k = carGeometry(kind), cnt = Math.max(1, per[ki]);
-      const parts = [k.body, k.glass, k.wheels, k.tail, k.head].map((g, pi) => {
-        const im = new THREE.InstancedMesh(g, mats[pi], cnt);
+    let kinds: Part[][] = MODELS?.cars.length ? MODELS.cars : [];
+    if (!kinds.length) {
+      const body = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.5, roughness: 0.3, envMapIntensity: 0.9 });
+      const glass = new THREE.MeshStandardMaterial({ color: 0x141b22, metalness: 0.8, roughness: 0.08 });
+      const wheel = new THREE.MeshStandardMaterial({ color: 0x18191b, roughness: 0.85 });
+      const tail = new THREE.MeshStandardMaterial({ color: 0x5a0a0a, emissive: new THREE.Color(0xff2a1a), emissiveIntensity: 1.2 });
+      const head = new THREE.MeshStandardMaterial({ color: 0xdddddd, emissive: new THREE.Color(0xfff6e0), emissiveIntensity: 1.4 });
+      kinds = (["sedan", "suv"] as const).map((kind) => {
+        const k = carGeometry(kind);
+        this.owned.push(k.body, k.glass, k.wheels, k.tail, k.head);
+        return [
+          { geo: k.body, mat: body, paint: true, shadow: true }, { geo: k.glass, mat: glass, shadow: true }, { geo: k.wheels, mat: wheel, shadow: true },
+          { geo: k.tail, mat: tail }, { geo: k.head, mat: head },
+        ];
+      });
+    }
+    const first = Math.ceil(n * 0.6), per = kinds.length > 1 ? [first, n - first] : [n];
+    kinds.forEach((kind, ki) => {
+      const cnt = Math.max(1, per[ki]);
+      const parts = kind.map((p) => {
+        const im = new THREE.InstancedMesh(p.geo, p.mat, cnt);
         im.frustumCulled = false;
-        im.castShadow = pi < 3;
-        im.receiveShadow = pi === 0;
+        im.castShadow = !!p.shadow;
+        im.receiveShadow = !!p.paint;
         this.group.add(im);
         return im;
       });
+      const paint = parts.filter((_, pi) => kind[pi].paint);
       for (let i = 0; i < cnt; i++) {
-        parts[0].setColorAt(i, new THREE.Color(PAINT[Math.floor(this.r() * PAINT.length)]));
+        const c = new THREE.Color(PAINT[Math.floor(this.r() * PAINT.length)]);
+        paint.forEach((im) => im.setColorAt(i, c));
         this.cars.push({ m: 0, lane: (this.cars.length % 3) as 0 | 1 | 2, v: 0, kind: ki as 0 | 1, idx: i });
       }
-      if (parts[0].instanceColor) parts[0].instanceColor.needsUpdate = true;
+      paint.forEach((im) => { if (im.instanceColor) im.instanceColor.needsUpdate = true; });
       this.parts.push(parts);
     });
+  }
+
+  dispose() {
+    for (const parts of this.parts) for (const im of parts) im.dispose();
+    this.owned.forEach((g) => g.dispose());
   }
 
   private spawn(c: Car, pos: number, initial: boolean) {
@@ -415,6 +486,13 @@ export class RoadView {
   private t = 0;
   private quality: Quality;
   private traffic: Traffic | null = null;
+  /** Soft contact shadow under the bike: grounds the rider at every quality level, even without shadow maps. */
+  private blob = (() => {
+    const b = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 2.1).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false, opacity: 0.55, color: 0x000000, polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8 }));
+    b.position.y = 0.012;
+    b.renderOrder = 1;
+    return b;
+  })();
 
   constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles; osmFar?: OsmTiles }) {
     this.quality = deps.settings().quality;
@@ -455,6 +533,7 @@ export class RoadView {
       this.hemi.intensity = 0.1;
     }, undefined, () => pm.dispose());
     loadPbr(() => applyPbr());
+    loadModels(import.meta.env.BASE_URL).then((m) => { MODELS = m; this.modelsArrived(); }).catch((e) => console.warn(e));
     this.hemi = new THREE.HemisphereLight(0xfff0dc, 0x9a7a58, 0.55);
     s.add(this.hemi);
     const sun = new THREE.DirectionalLight(0xffd9ac, 3.1);
@@ -476,11 +555,7 @@ export class RoadView {
     this.cam = new THREE.PerspectiveCamera(52, 1, 0.3, 30000);
     this.rider = buildRider();
     this.rider.g.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
-    // Soft contact shadow under the bike: grounds the rider at every quality level, even without shadow maps.
-    const blob = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 2.1).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false, opacity: 0.55, color: 0x000000, polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8 }));
-    blob.position.y = 0.012;
-    blob.renderOrder = 1;
-    this.rider.g.add(blob);
+    this.rider.g.add(this.blob);
     s.add(this.rider.g);
     this.ghost = buildRider(new THREE.MeshBasicMaterial({ color: 0x18d6c8, transparent: true, opacity: 0.5, depthWrite: false }));
     s.add(this.ghost.g);
@@ -622,7 +697,7 @@ export class RoadView {
     yield;
 
     // Props, placed by route distance so they don't jump when the window is rebuilt.
-    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], trunk: [], crown: [], ghafW: [], ghafCan: [], shrub: [], rock: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
+    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
     // Scenery off the road must clear the opposite carriageway on the left.
     const off = (sd: number, base: number) => (sd > 0 ? base : -(base + (city ? 14 : 9)));
     const each = (spacing: number, fn: (d: number, r: () => number) => void) => {
@@ -647,10 +722,19 @@ export class RoadView {
     // Double-arm lamps down the median, lighting both carriageways.
     if (city) each(36, (d) => lampAt(d, -7.25));
     else if (pb !== "mountains") each(50, (d) => lampAt(d, -5.15));
+    const palms: Palm[] = [], mh = MODELS?.palmHeight ?? 7.34;
+    const mtx = (x: number, y: number, z: number, sx: number, sy: number, sz: number, rx: number, ry: number, rz: number) =>
+      new THREE.Matrix4().compose(V3(x, y, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz)), V3(sx, sy, sz));
     const palm = (pt: THREE.Vector3, s: number, r: () => number) => {
-      const h = 5.5 + r() * 3.5;
-      it.trunk.push({ x: pt.x, y: pt.y, z: pt.z, sx: s, sz: s, sy: h * s, rz: (r() - 0.5) * 0.12 });
-      it.crown.push({ x: pt.x, y: pt.y + h * s - 0.1, z: pt.z, s: s * (0.9 + r() * 0.3), ry: r() * TAU });
+      const h = 5.5 + r() * 3.5, lean = (r() - 0.5) * 0.12, cs = s * (0.9 + r() * 0.3), ry = r() * TAU;
+      // The model's crown tops out ~1.9 m above its trunk, so scale it to the same overall height as the procedural palm.
+      const ms = (h * s + 1.9 * cs) / mh;
+      palms.push({
+        p: pt.clone(),
+        model: mtx(pt.x, pt.y - 0.05, pt.z, ms, ms, ms, 0, ry, lean * 0.5),
+        trunk: mtx(pt.x, pt.y, pt.z, s, h * s, s, 0, 0, lean),
+        crown: mtx(pt.x, pt.y + h * s - 0.1, pt.z, cs, cs, cs, 0, ry, 0),
+      });
     };
     if (scen?.palms) { const rp2 = rng(77); scen.palms.forEach((p) => palm(V3(p.x, C[near.query(p.x, p.z).i].y + 0.05, p.z), p.s, rp2)); }
     if (pb === "city") {
@@ -700,7 +784,7 @@ export class RoadView {
     add(inst(GEO.gpost, MAT.gpost, it.gpost)); add(inst(GEO.refl, MAT.refl, it.refl, false));
     add(inst(GEO.roofUnit, MAT.roofUnit, it.roofUnit));
     add(inst(GEO.pole, MAT.pole, it.pole)); add(inst(GEO.arm, MAT.pole, it.arm)); add(inst(GEO.lamp, MAT.lamp, it.lamp, false));
-    add(inst(GEO.trunk, MAT.trunk, it.trunk)); add(inst(GEO.crown, MAT.frond, it.crown));
+    const palmLod = palms.length ? new PalmLod(palms, MODELS?.palm ? q.palmNear : 0, group) : null;
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
     add(inst(GEO.rock, MAT.rock, it.rock));
     yield;
@@ -733,7 +817,28 @@ export class RoadView {
     }
     const label = BIOME_LABEL[pb] + (scen?.buildings ? ` · ${scen.buildings} buildings from OpenStreetMap` : "");
     const osmState = ctx.state === "none" ? "none" : ctx.state === "complete" && (far.state === "complete" || far.state === "none") ? "complete" : "partial";
-    return { group, m0, O, e0, route, osmState, keys, farKeys, profile: prof, biome: pb, label };
+    return { group, m0, O, e0, route, osmState, keys, farKeys, profile: prof, biome: pb, label, palms: palmLod };
+  }
+
+  /** Swap the detailed models in: rebuild the current window (palms), the traffic and the rider. */
+  private modelsArrived() {
+    if (!this.ready) return;
+    if (this.win && !this.building) this.building = { gen: this.buildWindow(this.win.m0), m0: this.win.m0 };
+    const mr = MODELS?.cyclist ? buildModelRider(MODELS.cyclist) : null;
+    if (mr) {
+      const old = this.rider.g;
+      mr.g.position.copy(old.position); mr.g.rotation.copy(old.rotation);
+      this.scene.remove(old);
+      mr.g.add(this.blob);
+      this.scene.add(mr.g);
+      this.rider = mr;
+    }
+    if (this.traffic) {
+      this.scene.remove(this.traffic.group);
+      this.traffic.dispose();
+      this.traffic = new Traffic(QUALITY[this.quality].cars);
+      this.scene.add(this.traffic.group);
+    }
   }
 
   private osmArrived(m0: number) {
@@ -898,6 +1003,7 @@ export class RoadView {
     this.sun.position.copy(ahead).addScaledVector(ld, 120);
     this.sun.target.position.copy(ahead);
     this.base.position.set(rp.x, rp.y - 1.5, rp.z);
+    w.palms?.update(dt, rp, fwd);
     if (this.traffic) this.traffic.update(dt, f.pos, { toL, city: w.biome === "city", lo: w.m0 - 480, hi: w.m0 + 2680 });
     this.renderer.render(this.scene, this.cam);
   }
