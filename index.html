@@ -647,6 +647,151 @@ function buildStrip() {
   RT.pois.filter(p => p.m > l.m0 && p.m < l.m1).forEach(p => { const d = document.createElement("div"); d.className = "stop"; d.style.left = ((p.m - l.m0) / (l.m1 - l.m0) * 100) + "%"; d.innerHTML = `<b>${p.name}</b>`; t.appendChild(d); });
 }
 
+// ================= REAL MAP CONTEXT: OpenStreetMap vector tiles (OpenFreeMap) around the ride =================
+const OSM = { lib: null, tmpl: null, failed: false, cache: new Map(), inflight: new Map(), Z: 14 };
+const lon2tx = (lon) => Math.floor((lon + 180) / 360 * 2 ** OSM.Z);
+const lat2ty = (lat) => { const r = lat * D2R; return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 2 ** OSM.Z); };
+async function osmLib() {
+  if (OSM.lib) return OSM.lib; if (OSM.failed || !live) return null;
+  try {
+    const [vt, pb] = await Promise.all([import("https://cdn.jsdelivr.net/npm/@mapbox/vector-tile@2.0.3/+esm"), import("https://cdn.jsdelivr.net/npm/pbf@4.0.1/+esm")]);
+    const tj = await (await fetch("https://tiles.openfreemap.org/planet")).json();
+    OSM.tmpl = tj.tiles[0]; OSM.lib = { VectorTile: vt.VectorTile, Pbf: pb.default }; return OSM.lib;
+  } catch (e) { OSM.failed = true; return null; }
+}
+const ROAD_W = { motorway: 15, trunk: 13, primary: 11, secondary: 9, tertiary: 8, minor: 6.5, service: 4.5 };
+const GREEN = { grass: 0x86A85E, park: 0x7FA65A, wood: 0x5E8A45, farmland: 0x9DB46A, wetland: 0x7F9E6A, golf: 0x8DB862 };
+const LANDUSE = { residential: 0xDCD2C2, commercial: 0xD9CFC4, retail: 0xD9CFC4, industrial: 0xCDC8BF, school: 0xD9D0BC, hospital: 0xDCCFC6, stadium: 0xCFC9B6, cemetery: 0xC9C2A6, university: 0xD9D0BC };
+function polysOf(g) { if (!g) return []; if (g.type === "Polygon") return [g.coordinates]; if (g.type === "MultiPolygon") return g.coordinates; return []; }
+function linesOf(g) { if (!g) return []; if (g.type === "LineString") return [g.coordinates]; if (g.type === "MultiLineString") return g.coordinates; return []; }
+function decodeTile(buf, x, y) {
+  const { VectorTile, Pbf } = OSM.lib, t = new VectorTile(new Pbf(buf)), out = { b: [], w: [], g: [], u: [], r: [] };
+  const each = (name, fn) => { const L = t.layers[name]; if (!L) return; for (let i = 0; i < L.length; i++) { const f = L.feature(i); try { fn(f.properties, f.toGeoJSON(x, y, OSM.Z).geometry); } catch (e) {} } };
+  each("building", (p, g) => { if (p.hide_3d) return; for (const poly of polysOf(g)) out.b.push({ rings: poly, h: +p.render_height || 6, mh: +p.render_min_height || 0 }); });
+  each("water", (p, g) => { for (const poly of polysOf(g)) out.w.push(poly); });
+  each("landcover", (p, g) => { if (!GREEN[p.class]) return; for (const poly of polysOf(g)) out.g.push({ c: GREEN[p.class], rings: poly }); });
+  each("park", (p, g) => { for (const poly of polysOf(g)) out.g.push({ c: GREEN.park, rings: poly }); });
+  each("landuse", (p, g) => { if (!LANDUSE[p.class]) return; for (const poly of polysOf(g)) out.u.push({ c: LANDUSE[p.class], rings: poly }); });
+  each("transportation", (p, g) => { const w = ROAD_W[p.class]; if (!w || p.brunnel === "tunnel") return; for (const line of linesOf(g)) out.r.push({ w, line }); });
+  return out;
+}
+function tilesForWindow(m0) {
+  let a = 180, b = -180, c = 90, d = -90;
+  for (let k = -500; k <= 2700; k += 150) { const p = at(RT, m0 + k).p; a = Math.min(a, p[0]); b = Math.max(b, p[0]); c = Math.min(c, p[1]); d = Math.max(d, p[1]); }
+  a -= .0075; b += .0075; c -= .0068; d += .0068; const keys = [];
+  for (let x = lon2tx(a); x <= lon2tx(b); x++) for (let y = lat2ty(d); y <= lat2ty(c); y++) keys.push(x + "/" + y);
+  return keys;
+}
+async function fetchTile(key) {
+  if (OSM.cache.has(key)) return OSM.cache.get(key); if (OSM.inflight.has(key)) return OSM.inflight.get(key);
+  const pr = (async () => {
+    const lib = await osmLib(); if (!lib) return null; const [x, y] = key.split("/").map(Number);
+    let data = { b: [], w: [], g: [], u: [], r: [] };
+    try { const res = await fetch(OSM.tmpl.replace("{z}", OSM.Z).replace("{x}", x).replace("{y}", y)); if (res.ok) data = decodeTile(await res.arrayBuffer(), x, y); } catch (e) {}
+    OSM.cache.set(key, data); OSM.inflight.delete(key);
+    if (OSM.cache.size > 60) OSM.cache.delete(OSM.cache.keys().next().value);
+    return data;
+  })();
+  OSM.inflight.set(key, pr); return pr;
+}
+function osmContext(m0) {
+  if (!live || OSM.failed) return { state: "none", data: null };
+  const keys = tilesForWindow(m0), have = keys.filter(k => OSM.cache.has(k));
+  if (!have.length) return { state: "pending", data: null };
+  const data = { b: [], w: [], g: [], u: [], r: [] };
+  for (const k of have) { const t = OSM.cache.get(k); for (const f of Object.keys(data)) data[f].push(...t[f]); }
+  return { state: have.length === keys.length ? "complete" : "partial", data };
+}
+function requestOSM(m0) {
+  if (!live || OSM.failed) return;
+  const keys = tilesForWindow(m0), missing = keys.filter(k => !OSM.cache.has(k));
+  if (missing.length) Promise.all(missing.map(fetchTile)).then(() => { if (ROAD.m0 === m0 && ROAD.ctxState !== "complete" && ROAD.routeRef === RT) buildWindow(m0); });
+  setTimeout(() => tilesForWindow(m0 + 800).forEach(k => { if (!OSM.cache.has(k)) fetchTile(k); }), 1500); // prefetch the next window
+}
+
+// ---- mesh builders for map features ----
+let RT_FACADE;
+function facadeTex() {
+  if (RT_FACADE) return RT_FACADE;
+  RT_FACADE = rTex(64, 64, (c, w, h) => { c.fillStyle = "#F4F1EB"; c.fillRect(0, 0, w, h); for (let r = 0; r < 4; r++) for (let q = 0; q < 4; q++) { c.fillStyle = (r * 7 + q * 3) % 11 === 0 ? "rgba(255,214,150,.85)" : "rgba(64,96,128,.62)"; c.fillRect(q * 16 + 3, r * 16 + 3, 10, 10); } });
+  return RT_FACADE;
+}
+function ringArea(r) { let s = 0; for (let i = 0; i < r.length; i++) { const a = r[i], b = r[(i + 1) % r.length]; s += a.x * b.y - b.x * a.y; } return s / 2; }
+function polyMesh(polys, toMap, y, offset, matOpts) {
+  const pos = [], col = [], c = new THREE.Color();
+  for (const { rings, color } of polys) {
+    let rs = rings.map(r => { const pts = r.map(toMap); if (pts.length > 1 && pts[0].equals(pts[pts.length - 1])) pts.pop(); return pts; }).filter(r => r.length >= 3);
+    if (!rs.length) continue;
+    if (ringArea(rs[0]) < 0) rs[0].reverse(); for (let k = 1; k < rs.length; k++) if (ringArea(rs[k]) > 0) rs[k].reverse();
+    let faces; try { faces = THREE.ShapeUtils.triangulateShape(rs[0], rs.slice(1)); } catch (e) { continue; }
+    const all = rs.flat(); c.set(color);
+    for (const f of faces) { let [i, j, k] = f; const A = all[i], B = all[j], C2 = all[k]; if ((B.x - A.x) * (C2.y - A.y) - (B.y - A.y) * (C2.x - A.x) < 0) [j, k] = [k, j];
+      for (const v of [all[i], all[j], all[k]]) { pos.push(v.x, y, -v.y); col.push(c.r, c.g, c.b); } }
+  }
+  if (!pos.length) return null;
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3)); g.computeVertexNormals();
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: matOpts.r ?? .95, metalness: matOpts.m ?? 0, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset });
+  const mesh = new THREE.Mesh(g, m); mesh.receiveShadow = true; m.userData.own = true; return mesh;
+}
+function buildingMeshes(blds, toMap) {
+  const wp = [], wu = [], wc = [], rp = [], rc = [], c = new THREE.Color();
+  for (const b of blds) {
+    let rs = b.rings.map(r => { const pts = r.map(toMap); if (pts.length > 1 && pts[0].equals(pts[pts.length - 1])) pts.pop(); return pts; }).filter(r => r.length >= 3);
+    if (!rs.length) continue;
+    if (ringArea(rs[0]) < 0) rs[0].reverse(); for (let k = 1; k < rs.length; k++) if (ringArea(rs[k]) > 0) rs[k].reverse();
+    const h = Math.max(4, b.h), y0 = Math.min(Math.max(0, b.mh), h - 2), y1 = h;
+    c.set(h > 80 ? 0xC2D2DE : h > 30 ? 0xE9E5DC : h > 12 ? 0xF1EADB : 0xEFE2C8);
+    for (const r of rs) { let acc = 0;
+      for (let i = 0; i < r.length; i++) { const a = r[i], q = r[(i + 1) % r.length], len = a.distanceTo(q), u0 = acc / 12, u1 = (acc + len) / 12; acc += len;
+        const v0 = 0, v1 = (y1 - y0) / 14;
+        wp.push(a.x, y0, -a.y, q.x, y0, -q.y, q.x, y1, -q.y, a.x, y0, -a.y, q.x, y1, -q.y, a.x, y1, -a.y);
+        wu.push(u0, v0, u1, v0, u1, v1, u0, v0, u1, v1, u0, v1);
+        for (let k = 0; k < 6; k++) wc.push(c.r, c.g, c.b); } }
+    let faces; try { faces = THREE.ShapeUtils.triangulateShape(rs[0], rs.slice(1)); } catch (e) { faces = []; }
+    const all = rs.flat(), rcol = c.clone().multiplyScalar(.82);
+    for (const f of faces) { let [i, j, k] = f; const A = all[i], B = all[j], C2 = all[k]; if ((B.x - A.x) * (C2.y - A.y) - (B.y - A.y) * (C2.x - A.x) < 0) [j, k] = [k, j];
+      for (const v of [all[i], all[j], all[k]]) { rp.push(v.x, y1, -v.y); rc.push(rcol.r, rcol.g, rcol.b); } }
+  }
+  const out = [];
+  if (wp.length) { const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(wp, 3)); g.setAttribute("uv", new THREE.Float32BufferAttribute(wu, 2)); g.setAttribute("color", new THREE.Float32BufferAttribute(wc, 3)); g.computeVertexNormals();
+    const m = new THREE.MeshStandardMaterial({ map: facadeTex(), vertexColors: true, roughness: .62, metalness: .05, emissive: new THREE.Color(0x2c2a26), emissiveMap: facadeTex() });
+    m.userData.own = true; const mesh = new THREE.Mesh(g, m); mesh.castShadow = true; mesh.receiveShadow = true; out.push(mesh); }
+  if (rp.length) { const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(rp, 3)); g.setAttribute("color", new THREE.Float32BufferAttribute(rc, 3)); g.computeVertexNormals();
+    const rm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: .9 }); rm.userData.own = true; const mesh = new THREE.Mesh(g, rm); mesh.receiveShadow = true; out.push(mesh); }
+  return out;
+}
+function roadMeshes(roads, toL) {
+  const geos = [];
+  for (const r of roads) { const C = r.line.map(toL); if (C.length < 2) continue; const g = ribbon(C, -r.w / 2, r.w / 2, .09, 9); g.deleteAttribute("uv"); geos.push(g); }
+  if (!geos.length) return null;
+  let merged; try { merged = mergeGeometries(geos); } catch (e) { return null; } geos.forEach(g => g.dispose());
+  const m = new THREE.MeshStandardMaterial({ color: 0x5E5D62, roughness: .92, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+  m.userData.own = true; const mesh = new THREE.Mesh(merged, m); mesh.receiveShadow = true; return mesh;
+}
+// Select and build everything the map knows about near this stretch of road.
+function mapScenery(ctx, toL, Cs, C) {
+  const toMap = (p) => { const v = toL(p); return new THREE.Vector2(v.x, -v.z); };
+  const near = (x, z, R) => { let best = 1e12; for (let k = 0; k < Cs.length; k++) { const dx = Cs[k].x - x, dz = Cs[k].z - z, q = dx * dx + dz * dz; if (q < best) best = q; } return Math.sqrt(best) < R; };
+  const minDist = (x, z) => { let best = 1e12; for (let k = 0; k < Cs.length; k++) { const dx = Cs[k].x - x, dz = Cs[k].z - z, q = dx * dx + dz * dz; if (q < best) best = q; } return Math.sqrt(best); };
+  const bboxOf = (rings) => { let a = 1e12, b = -1e12, c = 1e12, d = -1e12; for (const p of rings[0]) { const v = toL(p); a = Math.min(a, v.x); b = Math.max(b, v.x); c = Math.min(c, v.z); d = Math.max(d, v.z); } return { cx: (a + b) / 2, cz: (c + d) / 2, r: Math.hypot(b - a, d - c) / 2 }; };
+  const res = { meshes: [], buildings: 0, water: false, urbanUse: 0 };
+  // buildings: within 650 m of the road, never on it
+  const seen = new Set(), blds = [];
+  for (const b of ctx.b) { const bb = bboxOf(b.rings); const k = Math.round(bb.cx) + "," + Math.round(bb.cz) + "," + Math.round(b.h); if (seen.has(k)) continue; seen.add(k);
+    const d = minDist(bb.cx, bb.cz); if (d > 650 || d - bb.r < 10) continue; blds.push(b); if (blds.length > 2600) break; }
+  res.buildings = blds.length; res.meshes.push(...buildingMeshes(blds, toMap));
+  // water, greens, land use (big polygons: keep anything reaching within 1.5 km)
+  const pick = (arr, R) => arr.filter(f => { const bb = bboxOf(f.rings); return minDist(bb.cx, bb.cz) - bb.r < R; });
+  const water = pick(ctx.w.map(rings => ({ rings })), 1500); res.water = water.length > 0;
+  const W = polyMesh(water.map(f => ({ rings: f.rings, color: 0x2C88AA })), toMap, .06, -2, { r: .12, m: .15 }); if (W) res.meshes.push(W);
+  const greens = pick(ctx.g, 1200); const G = polyMesh(greens.map(f => ({ rings: f.rings, color: f.c })), toMap, .065, -2, {}); if (G) res.meshes.push(G);
+  const uses = pick(ctx.u, 1200); res.urbanUse = uses.length; const U = polyMesh(uses.map(f => ({ rings: f.rings, color: f.c })), toMap, .05, -1, {}); if (U) res.meshes.push(U);
+  // side roads and junctions (drawn under our own road)
+  const roads = ctx.r.filter(r => { const p = r.line[(r.line.length / 2) | 0]; const v = toL(p); return near(v.x, v.z, 700); }).slice(0, 1800);
+  const R = roadMeshes(roads, toL); if (R) res.meshes.push(R);
+  return res;
+}
+
 // ================= ROAD VIEW: on-the-road chase camera, synced to the real route =================
 const KX = Math.cos(24.8 * D2R) * 111320, KY = 110574;
 const ROAD = { ready: false, m0: -1e12, routeRef: null, win: [], yaw: undefined, camPos: null, look: null, t: 0 };
@@ -674,9 +819,9 @@ function makeShared() {
   RT_WIN = rTex(64, 256, (c, w, h) => { c.fillStyle = "#E6E9EC"; c.fillRect(0, 0, w, h); for (let y = 4; y < h; y += 10) for (let x = 3; x < w; x += 8) { c.fillStyle = Math.random() > .2 ? "rgba(70,105,135,.55)" : "rgba(255,226,170,.75)"; c.fillRect(x, y, 5, 6); } });
   const std = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: o.r ?? .8, metalness: o.m ?? 0, ...o.x });
   Object.assign(MAT, {
-    asph: new THREE.MeshStandardMaterial({ map: RT_ASPH, roughness: .9 }),
-    shoulder: std(0xD4B585, { r: 1 }), white: std(0xEFEBE2, { r: .6 }), yellow: std(0xE6B13A, { r: .6 }),
-    dash: new THREE.MeshStandardMaterial({ map: RT_DASH, transparent: true, alphaTest: .5, roughness: .6 }),
+    asph: new THREE.MeshStandardMaterial({ map: RT_ASPH, roughness: .9, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 }),
+    shoulder: std(0xD4B585, { r: 1, x: { polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 } }), white: std(0xEFEBE2, { r: .6, x: { polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6 } }), yellow: std(0xE6B13A, { r: .6, x: { polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6 } }),
+    dash: new THREE.MeshStandardMaterial({ map: RT_DASH, transparent: true, alphaTest: .5, roughness: .6, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6 }),
     post: std(0xF2F0EA, { r: .6 }), refl: std(0xF07A1A, { r: .3, x: { emissive: new THREE.Color(0xF07A1A), emissiveIntensity: .7 } }),
     pole: std(0xB8B6B0, { r: .35, m: .7 }), lamp: std(0xFFF4DC, { x: { emissive: new THREE.Color(0xFFE7B8), emissiveIntensity: 1.6 } }),
     trunk: std(0x8A6A48, { r: .95 }), frond: std(0x5F9A42, { r: .8, x: { side: THREE.DoubleSide } }), dates: std(0xB9772E),
@@ -751,7 +896,8 @@ function heightAt(biome, gx, gz, d) {
   if (biome === "desert") return sink + hDesert(gx, gz) * smooth(30, 85, d);
   if (biome === "mountains") return sink + hMount(gx, gz) * smooth(32, 300, d) + Math.max(0, d - 30) * .015 + hDesert(gx, gz) * .25 * smooth(30, 60, d);
   if (biome === "oasis") return sink + hDesert(gx, gz) * .7 * smooth(160, 520, d) + .25 * Math.sin(gx * .05) * Math.sin(gz * .04) * smooth(30, 45, d);
-  return sink + .2 * Math.sin(gx * .03) * Math.sin(gz * .027) * smooth(30, 45, d) + hDesert(gx, gz) * .4 * smooth(900, 1400, d);
+  if (biome === "flat") return sink + .02 * Math.sin(gx * .03) * Math.sin(gz * .027) * smooth(30, 45, d);
+  return sink + .03 * Math.sin(gx * .03) * Math.sin(gz * .027) * smooth(30, 45, d) + hDesert(gx, gz) * .4 * smooth(900, 1400, d);
 }
 function colorAt(biome, h, d, n) {
   const c = new THREE.Color();
@@ -795,14 +941,22 @@ function signBoard(name, km) {
 // ---- build the scenery window around the rider ----
 function buildWindow(m0) {
   const S = ROAD.scene;
-  ROAD.win.forEach(o => { S.remove(o); if (o.isInstancedMesh) o.dispose(); else o.traverse(x => { if (x.geometry && !Object.values(GEO).includes(x.geometry)) x.geometry.dispose(); if (x.material && x.material.map && x.material.userData.own) x.material.map.dispose(); }); });
+  ROAD.win.forEach(o => { S.remove(o); if (o.isInstancedMesh) o.dispose(); else o.traverse(x => { if (x.geometry && !Object.values(GEO).includes(x.geometry)) x.geometry.dispose(); if (x.material && x.material.userData.ownMap && x.material.map) x.material.map.dispose(); if (x.material && x.material.userData.own) x.material.dispose(); }); });
   ROAD.win = []; const add = (o) => { if (o) { S.add(o); ROAD.win.push(o); } };
   const prevO = ROAD.O; const op = at(RT, m0).p; const O = { x: op[0] * KX, y: op[1] * KY }; ROAD.O = O; ROAD.m0 = m0; ROAD.routeRef = RT;
   const toL = (p) => V3(p[0] * KX - O.x, 0, -(p[1] * KY - O.y)); ROAD.toL = toL;
   if (prevO && ROAD.camPos) { const dx = prevO.x - O.x, dz = -(prevO.y - O.y); ROAD.camPos.x += dx; ROAD.camPos.z += dz; if (ROAD.look) { ROAD.look.x += dx; ROAD.look.z += dz; } }
-  const biome = biomeAt(at(RT, m0 + 500).p); ROAD.biome = biome;
   const A = -500, B = 2700, STEP = 6, C = [];
   for (let d = A; d <= B; d += STEP) C.push(toL(at(RT, m0 + d).p));
+  const zone = biomeAt(at(RT, m0 + 500).p), ctxR = osmContext(m0); ROAD.ctxState = ctxR.state; requestOSM(m0);
+  let scen = null; if (ctxR.data) { try { scen = mapScenery(ctxR.data, toL, C.filter((_, i) => i % 4 === 0), C); } catch (e) { console.error(e); scen = null; } }
+  const urban = !!scen && (scen.buildings >= 15 || scen.urbanUse >= 3);
+  let hb, cb, pb;
+  if (scen) {
+    if (urban) { hb = scen.water ? "flat" : "city"; cb = "city"; pb = "city"; }
+    else { pb = zone === "city" ? "desert" : zone; cb = pb; hb = scen.water ? "flat" : pb; }
+  } else { hb = cb = pb = zone; }
+  const biome = pb; ROAD.biome = pb;
   const along = (d) => { const i = clamp(Math.round((d - A) / STEP), 1, C.length - 2); const t = C[i + 1].clone().sub(C[i - 1]); t.y = 0; if (t.lengthSq() < 1e-8) t.set(0, 0, -1); t.normalize(); return { p: C[i], t, n: V3(-t.z, 0, t.x), i }; };
   const clear = (pt, minD, i0) => { for (let k = Math.max(0, i0 - 45); k < Math.min(C.length, i0 + 45); k++) { const dx = C[k].x - pt.x, dz = C[k].z - pt.z; if (dx * dx + dz * dz < minD * minD) return false; } return true; };
   // road surface + markings
@@ -818,14 +972,15 @@ function buildWindow(m0) {
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), z = pos.getZ(i); let d2 = 1e12;
     for (let k = 0; k < Cs.length; k++) { const dx = Cs[k].x - x, dz = Cs[k].z - z, q = dx * dx + dz * dz; if (q < d2) d2 = q; }
-    const d = Math.sqrt(d2), gx = x + O.x, gz = z - O.y, h = heightAt(biome, gx, gz, d), n = .5 + .5 * Math.sin(gx * .013) * Math.sin(gz * .017);
-    pos.setY(i, h - .02); const c = colorAt(biome, h, d, n); cols.set([c.r, c.g, c.b], i * 3);
+    const d = Math.sqrt(d2), gx = x + O.x, gz = z - O.y, h = heightAt(hb, gx, gz, d), n = .5 + .5 * Math.sin(gx * .013) * Math.sin(gz * .017);
+    pos.setY(i, h - .02); const c = colorAt(cb, h, d, n); cols.set([c.r, c.g, c.b], i * 3);
   }
   geo.setAttribute("color", new THREE.BufferAttribute(cols, 3)); geo.computeVertexNormals();
-  const tm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: biome === "mountains" });
-  if (biome === "desert") { tm.normalMap = RT_RIPPLE; tm.normalScale = new THREE.Vector2(.6, .6); }
+  const tm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: hb === "mountains" }); tm.userData.own = true;
+  if (cb === "desert") { tm.normalMap = RT_RIPPLE; tm.normalScale = new THREE.Vector2(.6, .6); }
   const terr = new THREE.Mesh(geo, tm); terr.receiveShadow = true; add(terr);
-  const hAt = (pt, lat) => heightAt(biome, pt.x + O.x, pt.z - O.y, Math.abs(lat));
+  const hAt = (pt, lat) => heightAt(hb, pt.x + O.x, pt.z - O.y, Math.abs(lat));
+  if (scen) scen.meshes.forEach(add);
   // props (placed by global route distance so they stay put between rebuilds)
   const it = { post: [], refl: [], pole: [], arm: [], lamp: [], trunk: [], crown: [], ghafT: [], ghafC: [], shrub: [], rock: [], tower: [] };
   const each = (spacing, fn) => { const k0 = Math.ceil((m0 + A + 30) / spacing), k1 = Math.floor((m0 + B - 30) / spacing); for (let k = k0; k <= k1; k++) fn(k * spacing - m0, rng(k * 7919 + spacing * 31 + 3)); };
@@ -842,7 +997,7 @@ function buildWindow(m0) {
   const palm = (pt, s, r) => { const h = 5.5 + r() * 3.5; it.trunk.push({ x: pt.x, y: pt.y, z: pt.z, sx: s, sz: s, sy: h * s, rz: (r() - .5) * .12 }); it.crown.push({ x: pt.x, y: pt.y + h * s - .1, z: pt.z, s: s * (.9 + r() * .3), ry: r() * TAU }); };
   if (biome === "city") {
     each(20, (d, r) => { for (const sd of [-1, 1]) { const lat = sd * (10 + r() * 2.5), { a, pt } = place(d, lat, r); if (clear(pt, 7, a.i)) { pt.y = hAt(pt, lat); palm(pt, .95, r); } } });
-    each(18, (d, r) => { if (r() < .5) { const sd = r() > .5 ? 1 : -1, lat = sd * (80 + 560 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat, r); if (clear(pt, 30, a.i)) { const far = Math.abs(lat) / 640, hgt = 16 + r() * (35 + 170 * far), wd = 16 + r() * 24; it.tower.push({ x: pt.x, y: hAt(pt, lat) - 1, z: pt.z, sx: wd, sz: wd * (.7 + r() * .6), sy: hgt, ry: r() * TAU, c: [0xF4EFE6, 0xD3DDE6, 0xEADBC2, 0xFFFFFF, 0xC4D2DD][(r() * 5) | 0] }); } } });
+    if (!scen) each(18, (d, r) => { if (r() < .5) { const sd = r() > .5 ? 1 : -1, lat = sd * (80 + 560 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat, r); if (clear(pt, 30, a.i)) { const far = Math.abs(lat) / 640, hgt = 16 + r() * (35 + 170 * far), wd = 16 + r() * 24; it.tower.push({ x: pt.x, y: hAt(pt, lat) - 1, z: pt.z, sx: wd, sz: wd * (.7 + r() * .6), sy: hgt, ry: r() * TAU, c: [0xF4EFE6, 0xD3DDE6, 0xEADBC2, 0xFFFFFF, 0xC4D2DD][(r() * 5) | 0] }); } } });
   } else if (biome === "oasis") {
     each(6, (d, r) => { if (r() < .75) { const sd = r() > .5 ? 1 : -1, lat = sd * (9 + 130 * Math.pow(r(), 1.4)), { a, pt } = place(d, lat, r); if (clear(pt, 7.5, a.i)) { pt.y = hAt(pt, lat); palm(pt, .8 + r() * .4, r); } } });
   } else if (biome === "desert") {
@@ -864,7 +1019,7 @@ function buildWindow(m0) {
     for (let d = toNext % 5000; d < B - 40; d += 5000) {
       if (d < A + 40) continue; const km = Math.round((toNext - d) / 1000); if (km < 1) continue;
       const { a, pt } = place(d, 9.2, null), face = Math.atan2(-a.t.x, -a.t.z), g = new THREE.Group();
-      const tex = signBoard(next.name, km), mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, fog: true }); mat.userData.own = true;
+      const tex = signBoard(next.name, km), mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, fog: true }); mat.userData.own = true; mat.userData.ownMap = true;
       const board = new THREE.Mesh(new THREE.PlaneGeometry(4.6, 2.3), mat); board.position.set(0, 4.2, .03); g.add(board);
       const back = new THREE.Mesh(new THREE.BoxGeometry(4.7, 2.4, .08), MAT.sign); back.position.set(0, 4.2, -.02); back.castShadow = true; g.add(back);
       for (const dx of [-1.7, 1.7]) { const leg = new THREE.Mesh(new THREE.CylinderGeometry(.08, .08, 4.2, 8), MAT.pole); leg.position.set(dx, 2.1, -.08); leg.castShadow = true; g.add(leg); }
@@ -872,7 +1027,7 @@ function buildWindow(m0) {
     }
   }
   ROAD.C = C; ROAD.A = A; ROAD.STEP = STEP;
-  $("biomeChip").textContent = BIOME_LABEL[biome];
+  $("biomeChip").textContent = BIOME_LABEL[pb] + (scen ? (scen.buildings ? ` · ${scen.buildings} real buildings` : " · map data") : "");
 }
 
 // ---- per-frame ----
