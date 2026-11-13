@@ -111,9 +111,10 @@ async function loadTile(z: number, x: number, y: number, signal?: AbortSignal): 
       const cv = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(bmp.width, bmp.height) : Object.assign(document.createElement("canvas"), { width: bmp.width, height: bmp.height });
       const g = (cv as HTMLCanvasElement).getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D;
       g.drawImage(bmp, 0, 0);
-      const d = g.getImageData(0, 0, bmp.width, bmp.height).data;
-      bmp.close();
-      return { w: bmp.width, h: bmp.height, d };
+      const w = bmp.width, h = bmp.height;
+      const d = g.getImageData(0, 0, w, h).data;
+      bmp.close(); // width/height read as 0 after close(), so they're captured first
+      return { w, h, d };
     } catch (e) {
       if (signal?.aborted) throw e;
       if (attempt === 0 && !navigator.onLine) return null;

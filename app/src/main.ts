@@ -87,7 +87,7 @@ async function loadProfile(r: Route): Promise<ElevationProfile> {
   const g = gpxProfile(r);
   if (g) return g;
   try {
-    const c = await db.get<{ step: number; raw: Float32Array; loop: boolean }>(`profile:${r.id}`);
+    const c = await db.get<{ step: number; raw: Float32Array; loop: boolean }>(`profile2:${r.id}`);
     if (c?.raw?.length) return processProfile(c.raw, c.step, c.loop, "dem");
   } catch { /* none cached */ }
   return flatProfile(r);
@@ -102,8 +102,9 @@ function fetchElevation(r: Route) {
   demProfile(r, undefined, ac.signal)
     .then(async (p) => {
       if (ac.signal.aborted || r !== route) return;
+      if (p.max - p.min < 1) return; // nothing usable came back; try again next launch
       profile = p;
-      try { await db.set(`profile:${r.id}`, { step: p.step, raw: p.ele, loop: p.loop }); } catch { /* ignore */ }
+      try { await db.set(`profile2:${r.id}`, { step: p.step, raw: p.ele, loop: p.loop }); } catch { /* ignore */ }
       toast(`Real gradients loaded · ${Math.round(p.gain).toLocaleString()} m of climbing on this route`);
     })
     .catch(() => { /* offline: stay flat, try again next launch */ });
