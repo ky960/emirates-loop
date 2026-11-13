@@ -19,6 +19,7 @@ export interface Settings {
   ghost: boolean;
   terrain: boolean;
   sound: boolean;
+  traffic: boolean;
   showPower: boolean;
   quality: Quality;
   camera: Camera;
@@ -41,6 +42,7 @@ export const DEFAULTS: Settings = {
   ghost: true,
   terrain: true,
   sound: true,
+  traffic: true,
   showPower: false,
   quality: "balanced",
   camera: "road",

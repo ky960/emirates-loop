@@ -11,7 +11,6 @@ export interface OsmData {
   r: Array<{ w: number; line: LngLat[]; cls: string }>;
 }
 
-const Z = 14;
 const ROAD_W: Record<string, number> = { motorway: 15, trunk: 13, primary: 11, secondary: 9, tertiary: 8, minor: 6.5, service: 4.5 };
 const GREEN: Record<string, number> = { grass: 0x86a85e, park: 0x7fa65a, wood: 0x5e8a45, farmland: 0x9db46a, wetland: 0x7f9e6a, golf: 0x8db862 };
 const LANDUSE: Record<string, number> = {
@@ -22,6 +21,8 @@ const LANDUSE: Record<string, number> = {
 const empty = (): OsmData => ({ b: [], w: [], g: [], u: [], r: [] });
 
 export class OsmTiles {
+  /** z14 for detail near the road; z13 covers a wider area for the distant skyline. */
+  constructor(private Z = 14) {}
   private tmpl: string | null = null;
   private failed = false;
   private cache = new Map<string, OsmData>();
@@ -40,11 +41,11 @@ export class OsmTiles {
   }
 
   /** Tile keys covering a set of route points (with a margin of ~800 m). */
-  keysFor(pts: LngLat[]): string[] {
+  keysFor(pts: LngLat[], margin = 0.0075): string[] {
     let a = 180, b = -180, c = 90, d = -90;
     for (const p of pts) { a = Math.min(a, p[0]); b = Math.max(b, p[0]); c = Math.min(c, p[1]); d = Math.max(d, p[1]); }
-    a -= 0.0075; b += 0.0075; c -= 0.0068; d += 0.0068;
-    const keys: string[] = [];
+    a -= margin; b += margin; c -= margin * 0.9; d += margin * 0.9;
+    const Z = this.Z, keys: string[] = [];
     for (let x = Math.floor(lon2tileX(a, Z)); x <= Math.floor(lon2tileX(b, Z)); x++)
       for (let y = Math.floor(lat2tileY(d, Z)); y <= Math.floor(lat2tileY(c, Z)); y++) keys.push(x + "/" + y);
     return keys;
@@ -80,8 +81,8 @@ export class OsmTiles {
       if (tmpl) {
         const [x, y] = key.split("/").map(Number);
         try {
-          const res = await fetch(tmpl.replace("{z}", String(Z)).replace("{x}", String(x)).replace("{y}", String(y)));
-          if (res.ok) data = decodeTile(await res.arrayBuffer(), x, y);
+          const res = await fetch(tmpl.replace("{z}", String(this.Z)).replace("{x}", String(x)).replace("{y}", String(y)));
+          if (res.ok) data = decodeTile(await res.arrayBuffer(), x, y, this.Z);
         } catch { /* offline: keep empty */ }
       }
       this.cache.set(key, data);
@@ -105,7 +106,7 @@ function linesOf(g: GeoJSON.Geometry): LngLat[][] {
   return [];
 }
 
-function decodeTile(buf: ArrayBuffer, x: number, y: number): OsmData {
+function decodeTile(buf: ArrayBuffer, x: number, y: number, Z: number): OsmData {
   const t = new VectorTile(new Pbf(new Uint8Array(buf))), out = empty();
   const each = (name: string, fn: (p: Record<string, unknown>, g: GeoJSON.Geometry) => void) => {
     const L = t.layers[name];

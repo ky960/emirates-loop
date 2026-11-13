@@ -39,8 +39,9 @@ const engine = new RideEngine({
   basePos: () => progressOf(rides, route.id) + DEV_KM * 1000,
   ghost: () => ghost,
 });
-const osm = new OsmTiles();
-const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm });
+const osm = new OsmTiles(14);
+const osmFar = new OsmTiles(13);
+const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm, osmFar });
 const mapView = new MapView($("map"), () => settings);
 const audio = new RideAudio();
 audio.enabled = settings.sound;

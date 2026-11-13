@@ -60,6 +60,7 @@ export function renderSettings(el: HTMLElement, ctx: AppCtx) {
       ${sw("autoPause", "Auto-pause", "Stops the clock when you stop pedalling; pedal to carry on.")}
       ${sw("ghost", "Race your ghost", "Replays your best ride second by second.")}
       ${sw("sound", "Ride sound", "Wind, freewheel and a chime at each town.")}
+      ${sw("traffic", "Traffic", "Cars on the road in the 3D view. Changes the next time the app opens.")}
       ${sw("showPower", "Show estimated power", "Estimated from speed — not a power meter.")}
     </div>
 
