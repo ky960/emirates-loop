@@ -30,6 +30,21 @@ const QUALITY: Record<Quality, { grid: number; shadow: number; shadowR: number; 
 /** Horizon haze: fog and the far ground fade into the sky colour so there is no hard edge. */
 const HAZE = 0xdcd2c2;
 
+/**
+ * Each ride starts in a parking lot on the right of the road at the ride's start position and rolls out
+ * onto the road. Distances are along the road from the start (m); lateral offsets are to the right (m).
+ */
+const LOT = {
+  a0: -40, a1: 76,          // lot extent along the road
+  l0: 11, l1: 36,           // lot extent to the right (road-side kerb .. back kerb)
+  aisle: 23.5,              // the rider waits in the middle of the aisle
+  exitA0: 36, exitA1: 62,   // gap in the first row of bays where the rider turns out
+  drvA0: 44, drvA1: 74,     // driveway across the verge onto the road
+  roll0: 28, roll1: 72,     // rider leaves the aisle at roll0 and is in the lane by roll1
+};
+/** Rider's lateral offset (m, right of the centreline) `d` metres after the ride start. */
+const lotLat = (d: number) => (d < LOT.roll0 ? LOT.aisle : LOT.aisle + (1.9 - LOT.aisle) * smoothstep(LOT.roll0, LOT.roll1, d));
+
 const lerpAngle = (a: number, b: number, t: number) => a + (((((b - a) % TAU) + TAU * 1.5) % TAU) - Math.PI) * t;
 
 // ---------- terrain shape ----------
@@ -161,6 +176,10 @@ interface Win {
   biome: Biome;
   label: string;
   palms: PalmLod | null;
+  /** Ride start (m) this window's parking lot was built for. */
+  lotS: number;
+  /** The lot's frame (null if there's no room for one here): origin on the centreline at the ride start, along-road and right-hand axes, lot surface height. */
+  lot: { o: THREE.Vector3; t: THREE.Vector3; n: THREE.Vector3; y: number; s: number } | null;
 }
 
 /** One palm: a detailed-model transform for close range and trunk/crown transforms for the procedural palm. */
@@ -278,8 +297,10 @@ function makeShared() {
     rock: std(0x8a6a55, { r: 0.95, x: { flatShading: true } }),
     ...facadeMaterials(),
     sign: std(0x8e8e8a, { r: 0.5, m: 0.5 }),
+    canopy: std(0xece6d8, { r: 0.9, x: { side: THREE.DoubleSide } }),
   });
   GEO.post = new THREE.BoxGeometry(0.1, 0.95, 0.1).translate(0, 0.475, 0);
+  GEO.bay = new THREE.BoxGeometry(0.12, 0.01, 5.4); // parking bay line, lengthwise across the road direction
   GEO.refl = new THREE.BoxGeometry(0.105, 0.14, 0.105).translate(0, 0.82, 0);
   GEO.pole = new THREE.CylinderGeometry(0.08, 0.13, 1, 8).translate(0, 0.5, 0);
   GEO.arm = new THREE.BoxGeometry(0.08, 0.08, 1).translate(0, 0, 0.5);
@@ -486,6 +507,8 @@ export class RoadView {
   private t = 0;
   private quality: Quality;
   private traffic: Traffic | null = null;
+  /** Where the current (or next) ride starts; the parking lot is built there. */
+  private lotS = 0;
   /** Soft contact shadow under the bike: grounds the rider at every quality level, even without shadow maps. */
   private blob = (() => {
     const b = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 2.1).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false, opacity: 0.55, color: 0x000000, polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8 }));
@@ -585,6 +608,34 @@ export class RoadView {
     const A = -500, B = 2700, STEP = 6, C: THREE.Vector3[] = [];
     for (let d = A; d <= B; d += STEP) C.push(toL(pointAt(route, m0 + d).p, eleAt(prof, route.total, m0 + d) - e0));
     const near = new Nearest(C);
+    // Parking lot at the ride start: a flat rectangle lined up with the road there, on the right.
+    // Left out when it falls outside this window or another stretch of road runs through it (e.g. at a U-turn).
+    const lotS = this.lotS, lsRel = lotS - m0, ci = (d: number) => clamp(Math.round((d - A) / STEP), 1, C.length - 2);
+    let lotF: { o: THREE.Vector3; t: THREE.Vector3; n: THREE.Vector3; a0: number; s: number } | null = null;
+    if (lsRel - 40 > A + 30 && lsRel + LOT.a1 < B - 30) {
+      // Lined up with the road just ahead of the start (where the rider rolls out).
+      const i0 = ci(lsRel), t = C[ci(lsRel + 30)].clone().sub(C[i0]).setY(0).normalize(), n = V3(-t.z, 0, t.x), o = C[i0].clone();
+      const clear = (a0: number) => C.every((c) => {
+        const dx = c.x - o.x, dz = c.z - o.z, al = dx * t.x + dz * t.z, lat = dx * n.x + dz * n.z;
+        return !(al > a0 - 10 && al < LOT.a1 + 12 && lat > 4.5 && lat < LOT.l1 + 16);
+      });
+      // Full length if there's room; near a bend or junction, a shorter lot that starts a little ahead
+      // (the rider then begins at its near end, s metres along).
+      const a0 = [LOT.a0, -20, -6, 12, 26].find(clear);
+      if (a0 !== undefined) lotF = { o, t, n, a0, s: Math.max(0, a0 + 6) };
+    }
+    /** (x, z) in lot coordinates: metres along the road from the ride start, and to its right. */
+    const lotXY = (x: number, z: number) => { const f = lotF!, dx = x - f.o.x, dz = z - f.o.z; return { al: dx * f.t.x + dz * f.t.z, lat: dx * f.n.x + dz * f.n.z }; };
+    /** Lot coordinates to a scene position. */
+    const lotP = (al: number, lat: number, y: number) => lotF!.o.clone().addScaledVector(lotF!.t, al).addScaledVector(lotF!.n, lat).setY(y);
+    /** Is (x, z) within `pad` metres of the lot or its driveway? Scenery there is left out. */
+    const inLot = (x: number, z: number, pad = 0) => {
+      if (!lotF) return false;
+      const { al, lat } = lotXY(x, z);
+      if (al < lotF.a0 - pad || al > LOT.a1 + pad) return false;
+      if (lat > LOT.l0 - 1.5 - pad && lat < LOT.l1 + 1.5 + pad) return true;
+      return al > LOT.drvA0 - pad && al < LOT.drvA1 + pad && lat > 3.5 - pad && lat < LOT.l0 + pad;
+    };
     const zoneP = pointAt(route, m0 + 500).p, zoneEle = eleAt(prof, route.total, m0 + 500);
     const zone = zoneAt(zoneP, zoneEle);
     const keys = this.deps.osm.keysFor(C.filter((_, i) => i % 25 === 0).map((v) => [(v.x + O.x) / KX, (-v.z + O.y) / KY] as LngLat));
@@ -598,7 +649,7 @@ export class RoadView {
     yield;
 
     let scen: ReturnType<RoadView["scenery"]> | null = null;
-    if (ctx.data) { try { scen = this.scenery(ctx.data, toL, near, C, zone, q); } catch (e) { console.error(e); } }
+    if (ctx.data) { try { scen = this.scenery(ctx.data, toL, near, C, zone, q, inLot); } catch (e) { console.error(e); } }
     const urban = !!scen && scen.buildings >= 40;
     const mountainous = zone === "mountains";
     let hb: Biome, cb: Biome, pb: Biome;
@@ -639,7 +690,12 @@ export class RoadView {
       add(mk(sweep(C, JERSEY, -5.15), MAT.concrete));
       R(-13.4, -5.5, 0.1, MAT.asph); R(-9.56, -9.34, 0.14, MAT.dash, 12);
       R(-5.88, -5.72, 0.14, MAT.yellow); R(-13.2, -13.04, 0.14, MAT.white);
-      const rail = mk(sweep(C, WBEAM, 7.05), MAT.wbeam); rail.castShadow = true; add(rail);
+      // Right-hand guardrail, with a gap for the parking-lot driveway.
+      const gap = lotF ? [ci(lsRel + LOT.drvA0 - 3), ci(lsRel + LOT.drvA1 + 3)] : null;
+      for (const [i0, i1] of gap ? [[0, gap[0]], [gap[1], C.length - 1]] : [[0, C.length - 1]]) {
+        if (i1 - i0 < 2) continue;
+        const rail = mk(sweep(C.slice(i0, i1 + 1), WBEAM, 7.05), MAT.wbeam); rail.castShadow = true; add(rail);
+      }
       const rail2 = mk(sweep(C, WBEAM.map(([o, h]) => [-o, h] as [number, number]), -14.0), MAT.wbeam); add(rail2);
     }
     yield;
@@ -652,7 +708,9 @@ export class RoadView {
     const pos = geo.attributes.position as THREE.BufferAttribute, cols = new Float32Array(pos.count * 3);
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i), nr = near.query(x, z);
-      const gx = x + O.x, gz = z - O.y, h = heightAt(hb, gx, gz, nr.d), n = 0.5 + 0.5 * Math.sin(gx * 0.013) * Math.sin(gz * 0.017);
+      const gx = x + O.x, gz = z - O.y, n = 0.5 + 0.5 * Math.sin(gx * 0.013) * Math.sin(gz * 0.017);
+      let h = heightAt(hb, gx, gz, nr.d);
+      if (lotF && inLot(x, z, 25)) h = inLot(x, z, 6) ? Math.min(h, lotF.o.y - C[nr.i].y - 0.35) : (h - 0.35) / 2; // level ground under the lot
       pos.setY(i, C[nr.i].y + h - 0.02);
       const c = colorAt(cb, h, nr.d, n);
       cols[i * 3] = c.r; cols[i * 3 + 1] = c.g; cols[i * 3 + 2] = c.b;
@@ -706,8 +764,8 @@ export class RoadView {
     };
     const place = (d: number, lat: number) => { const a = along(d); return { a, pt: a.p.clone().addScaledVector(a.n, lat) }; };
     if (!city) {
-      each(4, (d) => { for (const lat of [7.16, -14.11]) { const { pt } = place(d, lat); it.gpost.push({ x: pt.x, y: pt.y, z: pt.z }); } });
-      each(24, (d) => { const { pt } = place(d, 7.12); it.refl.push({ x: pt.x, y: pt.y - 0.05, z: pt.z }); });
+      each(4, (d) => { for (const lat of [7.16, -14.11]) { const { pt } = place(d, lat); if (!inLot(pt.x, pt.z, 3)) it.gpost.push({ x: pt.x, y: pt.y, z: pt.z }); } });
+      each(24, (d) => { const { pt } = place(d, 7.12); if (!inLot(pt.x, pt.z, 3)) it.refl.push({ x: pt.x, y: pt.y - 0.05, z: pt.z }); });
     }
     const lampAt = (d: number, lat: number) => {
       const { a, pt } = place(d, lat), top = 11;
@@ -725,7 +783,8 @@ export class RoadView {
     const palms: Palm[] = [], mh = MODELS?.palmHeight ?? 7.34;
     const mtx = (x: number, y: number, z: number, sx: number, sy: number, sz: number, rx: number, ry: number, rz: number) =>
       new THREE.Matrix4().compose(V3(x, y, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz)), V3(sx, sy, sz));
-    const palm = (pt: THREE.Vector3, s: number, r: () => number) => {
+    const palm = (pt: THREE.Vector3, s: number, r: () => number, force = false) => {
+      if (!force && inLot(pt.x, pt.z, 3)) return;
       const h = 5.5 + r() * 3.5, lean = (r() - 0.5) * 0.12, cs = s * (0.9 + r() * 0.3), ry = r() * TAU;
       // The model's crown tops out ~1.9 m above its trunk, so scale it to the same overall height as the procedural palm.
       const ms = (h * s + 1.9 * cs) / mh;
@@ -745,7 +804,7 @@ export class RoadView {
       if (!scen || scen.buildings < 40) each(18, (d, r) => {
         if (r() < 0.5) {
           const sd = r() > 0.5 ? 1 : -1, lat = off(sd, 80 + 560 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat);
-          if (clear(pt, 30, a.i)) {
+          if (!inLot(pt.x, pt.z, 6) && clear(pt, 30, a.i)) {
             const far = Math.abs(lat) / 640, hgt = 16 + r() * (35 + 170 * far), wd = 16 + r() * 24;
             // Rectangular footprint, built like an OSM building so it gets real facades, a roof and rooftop plant.
             const dp = wd * (0.7 + r() * 0.6), ry = r() * TAU, cs = Math.cos(ry), sn = Math.sin(ry);
@@ -764,26 +823,115 @@ export class RoadView {
       each(28, (d, r) => {
         if (r() < 0.5) {
           const sd = r() > 0.5 ? 1 : -1, lat = off(sd, 14 + 170 * Math.pow(r(), 1.5)), { a, pt } = place(d, lat);
-          if (clear(pt, 10, a.i)) {
+          if (!inLot(pt.x, pt.z, 6) && clear(pt, 10, a.i)) {
             const y = hAt(pt, lat) - 0.1, s = 0.75 + r() * 0.6, ry = r() * TAU;
             it.ghafW.push({ x: pt.x, y, z: pt.z, s, ry });
             it.ghafCan.push({ x: pt.x, y, z: pt.z, s, ry });
           }
         }
       });
-      each(5, (d, r) => { if (r() < 0.5) { const sd = r() > 0.5 ? 1 : -1, lat = off(sd, 8.5 + 70 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat); if (clear(pt, 8, a.i)) { const s = 0.25 + r() * 0.45; it.shrub.push({ x: pt.x, y: hAt(pt, lat) + s * 0.3, z: pt.z, sx: s, sy: s * 0.6, sz: s, ry: r() * TAU }); } } });
+      each(5, (d, r) => { if (r() < 0.5) { const sd = r() > 0.5 ? 1 : -1, lat = off(sd, 8.5 + 70 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat); if (!inLot(pt.x, pt.z, 2) && clear(pt, 8, a.i)) { const s = 0.25 + r() * 0.45; it.shrub.push({ x: pt.x, y: hAt(pt, lat) + s * 0.3, z: pt.z, sx: s, sy: s * 0.6, sz: s, ry: r() * TAU }); } } });
     } else {
       // Mountains: rocks half-buried in the slope so they sit on the ground rather than float.
       each(5, (d, r) => {
         if (r() < 0.65) {
           const sd = r() > 0.5 ? 1 : -1, lat = off(sd, 8.5 + 170 * Math.pow(r(), 1.3)), { a, pt } = place(d, lat);
-          if (clear(pt, 8, a.i)) { const s = 0.4 + r() * (1 + Math.abs(lat) / 30); it.rock.push({ x: pt.x, y: hAt(pt, lat) - s * 0.25, z: pt.z, sx: s * (1 + r() * 0.6), sy: s * (0.6 + r() * 0.5), sz: s, rx: r() * 3, ry: r() * 3 }); }
+          if (!inLot(pt.x, pt.z, 3) && clear(pt, 8, a.i)) { const s = 0.4 + r() * (1 + Math.abs(lat) / 30); it.rock.push({ x: pt.x, y: hAt(pt, lat) - s * 0.25, z: pt.z, sx: s * (1 + r() * 0.6), sy: s * (0.6 + r() * 0.5), sz: s, rx: r() * 3, ry: r() * 3 }); }
         }
       });
     }
     add(inst(GEO.gpost, MAT.gpost, it.gpost)); add(inst(GEO.refl, MAT.refl, it.refl, false));
     add(inst(GEO.roofUnit, MAT.roofUnit, it.roofUnit));
     add(inst(GEO.pole, MAT.pole, it.pole)); add(inst(GEO.arm, MAT.pole, it.arm)); add(inst(GEO.lamp, MAT.lamp, it.lamp, false));
+    // ---- Parking lot at the ride start: two rows of bays, shade canopies, lamps, palms, parked cars. ----
+    const lotY = city ? 0.25 : 0.1;
+    if (lotF) {
+      const r = rng(Math.floor(lotS) * 13 + 7), ly = lotF.o.y + lotY;
+      /** Flat quad in lot coordinates (al0..al1 along, o0..o1 across) at height y; `y1` tilts it across. */
+      const quad = (al0: number, al1: number, o0: number, o1: number, y: number, mat: THREE.Material, y1 = y, uScale = 7.6) => {
+        const pts = [lotP(al0, o0, y), lotP(al0, o1, y1), lotP(al1, o0, y), lotP(al1, o1, y1)], g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.Float32BufferAttribute(pts.flatMap((v) => [v.x, v.y, v.z]), 3));
+        const u = (o1 - o0) / uScale, v0 = al0 / 9, v1 = al1 / 9;
+        g.setAttribute("uv", new THREE.Float32BufferAttribute([0, v0, u, v0, 0, v1, u, v1], 2));
+        g.setIndex([0, 1, 2, 1, 3, 2]);
+        g.computeVertexNormals();
+        if (g.attributes.normal.getY(0) < 0) g.setIndex([0, 2, 1, 1, 2, 3]), g.computeVertexNormals();
+        const m = mk(g, mat);
+        add(m);
+        return m;
+      };
+      quad(lotF.a0, LOT.a1, LOT.l0, LOT.l1, ly, MAT.asph);
+      // Driveway: from the road's edge (following the road) to the lot's edge (flat).
+      {
+        const pos: number[] = [], uv: number[] = [], idx: number[] = [], e0 = city ? 3.75 : 6.6, steps = 8;
+        for (let k = 0; k <= steps; k++) {
+          const al = LOT.drvA0 + ((LOT.drvA1 - LOT.drvA0) * k) / steps, road = place(lsRel + al, e0), lotEdge = lotP(al, LOT.l0 + 0.5, ly + 0.004);
+          pos.push(road.pt.x, road.a.p.y + lotY + 0.004, road.pt.z, lotEdge.x, lotEdge.y, lotEdge.z);
+          uv.push(0, al / 9, 1, al / 9);
+          if (k < steps) idx.push(k * 2, k * 2 + 1, k * 2 + 2, k * 2 + 1, k * 2 + 3, k * 2 + 2);
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+        g.setIndex(idx);
+        g.computeVertexNormals();
+        if (g.attributes.normal.getY(0) < 0) { g.setIndex(idx.map((_, q) => idx[q - (q % 3) + [0, 2, 1][q % 3]])); g.computeVertexNormals(); }
+        add(mk(g, MAT.asph));
+      }
+      const kerb = city ? MAT.kerbPaint : MAT.kerb;
+      quad(lotF.a0, LOT.drvA0, LOT.l0 - 0.3, LOT.l0, ly + 0.02, kerb, ly + 0.02, 0.3);
+      quad(LOT.drvA1, LOT.a1, LOT.l0 - 0.3, LOT.l0, ly + 0.02, kerb, ly + 0.02, 0.3);
+      quad(lotF.a0, LOT.a1, LOT.l1, LOT.l1 + 0.3, ly + 0.02, kerb, ly + 0.02, 0.3);
+      // Shade canopies over the far row (a common sight in UAE car parks), sloping down toward the aisle.
+      const cm = quad(lotF.a0 + 2, LOT.a1 - 2, 28.6, LOT.l1 + 0.2, ly + 2.5, MAT.canopy, ly + 3.2);
+      cm.castShadow = true;
+      const ry = Math.atan2(lotF.n.x, lotF.n.z), lotItems: Record<string, Item[]> = { bay: [], post: [], pole: [], arm: [], lamp: [] };
+      for (let k = Math.ceil(lotF.a0 / 2.7); k * 2.7 < LOT.a1 - 2; k++) {
+        const al = k * 2.7;
+        for (const [lat, row] of [[15, 1], [32, 2]] as const) {
+          if (row === 1 && al > LOT.exitA0 && al < LOT.exitA1) continue;
+          const sp = lotP(al, lat, ly + 0.012);
+          lotItems.bay.push({ x: sp.x, y: sp.y, z: sp.z, ry });
+          if (row === 2 && k % 2 === 0) { const pp = lotP(al, LOT.l1 - 0.4, ly); lotItems.post.push({ x: pp.x, y: pp.y, z: pp.z, sx: 0.55, sz: 0.55, sy: 3.2 }); }
+        }
+      }
+      // Lamp posts between the first row and the aisle, lighting both rows.
+      for (const al of [-24, 8, 70].filter((x) => x > lotF.a0 + 2)) {
+        const pt = lotP(al, 18.7, ly), top = 11;
+        lotItems.pole.push({ x: pt.x, y: pt.y, z: pt.z, sy: top });
+        for (const sd of [1, -1]) {
+          const dir = lotF.n.clone().multiplyScalar(sd), ay = Math.atan2(dir.x, dir.z), hp = pt.clone().addScaledVector(dir, 2.6);
+          lotItems.arm.push({ x: pt.x, y: pt.y + top - 0.2, z: pt.z, ry: ay, sz: 2.6 });
+          lotItems.lamp.push({ x: hp.x, y: pt.y + top - 0.3, z: hp.z, ry: ay, sz: 0.9 });
+        }
+      }
+      add(inst(GEO.bay, MAT.white, lotItems.bay, false)); add(inst(GEO.pole, MAT.pole, lotItems.post));
+      add(inst(GEO.pole, MAT.pole, lotItems.pole)); add(inst(GEO.arm, MAT.pole, lotItems.arm)); add(inst(GEO.lamp, MAT.lamp, lotItems.lamp, false));
+      // Parked cars, nose in, in about half the bays (never in the rider's way out).
+      const kinds = MODELS?.cars ?? [];
+      if (kinds.length) {
+        const cars = kinds.map(() => ({ paint: [] as Item[], plain: [] as Item[] }));
+        for (let k = Math.ceil(lotF.a0 / 2.7); (k + 1) * 2.7 < LOT.a1 - 2; k++) {
+          const al = k * 2.7 + 1.35;
+          for (const row of [1, 2]) {
+            if (r() > 0.55 || (row === 1 && al > LOT.exitA0 - 3 && al < LOT.exitA1 + 3)) continue;
+            const pt = lotP(al, row === 1 ? 15 : 32.2, ly), f = lotF.n.clone().multiplyScalar(row === 1 ? -1 : 1);
+            const ki = Math.floor(r() * kinds.length), cry = Math.atan2(-f.x, -f.z) + (r() - 0.5) * 0.06;
+            const base = { x: pt.x, y: pt.y, z: pt.z, ry: cry };
+            cars[ki].plain.push(base);
+            cars[ki].paint.push({ ...base, c: PAINT[Math.floor(r() * PAINT.length)] });
+          }
+        }
+        kinds.forEach((parts, ki) => parts.forEach((p) => add(inst(p.geo, p.mat, p.paint ? cars[ki].paint : cars[ki].plain, !!p.shadow))));
+      }
+      for (let al = lotF.a0 + 3; al < LOT.a1 - 2; al += 10) {
+        for (const lat of [LOT.l1 + 2.2, 9.6]) {
+          if (lat < 10 && al > LOT.drvA0 - 4 && al < LOT.drvA1 + 4) continue;
+          palm(lotP(al, lat, ly), 0.85 + r() * 0.2, r, true);
+        }
+      }
+    }
+
     const palmLod = palms.length ? new PalmLod(palms, MODELS?.palm ? q.palmNear : 0, group) : null;
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
     add(inst(GEO.rock, MAT.rock, it.rock));
@@ -817,7 +965,7 @@ export class RoadView {
     }
     const label = BIOME_LABEL[pb] + (scen?.buildings ? ` · ${scen.buildings} buildings from OpenStreetMap` : "");
     const osmState = ctx.state === "none" ? "none" : ctx.state === "complete" && (far.state === "complete" || far.state === "none") ? "complete" : "partial";
-    return { group, m0, O, e0, route, osmState, keys, farKeys, profile: prof, biome: pb, label, palms: palmLod };
+    return { group, m0, O, e0, route, osmState, keys, farKeys, profile: prof, biome: pb, label, palms: palmLod, lotS, lot: lotF ? { o: lotF.o, t: lotF.t, n: lotF.n, s: lotF.s, y: lotY } : null };
   }
 
   /** Swap the detailed models in: rebuild the current window (palms), the traffic and the rider. */
@@ -846,7 +994,7 @@ export class RoadView {
     if (this.win && this.win.m0 === m0 && this.win.osmState !== "complete" && !this.building) this.building = { gen: this.buildWindow(m0), m0 };
   }
 
-  private scenery(ctx: OsmData, toL: (p: LngLat, y?: number) => THREE.Vector3, near: Nearest, C: THREE.Vector3[], zone: Biome, q: (typeof QUALITY)[Quality]) {
+  private scenery(ctx: OsmData, toL: (p: LngLat, y?: number) => THREE.Vector3, near: Nearest, C: THREE.Vector3[], zone: Biome, q: (typeof QUALITY)[Quality], inLot: (x: number, z: number, pad?: number) => boolean) {
     const yAt = (x: number, z: number) => C[near.query(x, z).i].y;
     const toMap = (p: LngLat) => { const v = toL(p); return new THREE.Vector2(v.x, -v.z); };
     const bbox = (rings: LngLat[][]) => {
@@ -863,7 +1011,7 @@ export class RoadView {
       seen.add(k);
       const nr = near.query(bb.cx, bb.cz);
       const limit = b.h > 60 ? 1600 : 650;
-      if (nr.d > limit || nr.d - bb.r < 12) continue;
+      if (nr.d > limit || nr.d - bb.r < 12 || inLot(bb.cx, bb.cz, bb.r)) continue;
       blds.push({ ...b, y: C[nr.i].y });
       if (blds.length > q.buildings) break;
     }
@@ -897,7 +1045,7 @@ export class RoadView {
         const pt = new THREE.Vector2(a + r() * (b2 - a), c3 + r() * (d2 - c3));
         if (!inside(pt, ring)) continue;
         const dd = near.query(pt.x, -pt.y).d;
-        if (dd < 10 || dd > 450) continue;
+        if (dd < 10 || dd > 450 || inLot(pt.x, -pt.y, 2)) continue;
         res.palms.push({ x: pt.x, z: -pt.y, s: 0.8 + r() * 0.4 });
       }
     }
@@ -920,6 +1068,7 @@ export class RoadView {
   render(f: Frame, dt: number, crank: number) {
     if (!this.ready) return;
     const route = this.deps.route();
+    this.lotS = f.startM;
     // Build windows ahead of need, a few milliseconds per frame.
     if (!this.win || this.win.route !== route || this.win.profile !== this.deps.profile()) {
       if (this.win) this.dropWin();
@@ -928,7 +1077,8 @@ export class RoadView {
       while (!r.done) r = gen.next();
       this.swapIn(r.value);
       this.building = null;
-    } else if (!this.building && (f.pos > this.win.m0 + 800 || f.pos < this.win.m0 - 300)) {
+    } else if (!this.building && (f.pos > this.win.m0 + 800 || f.pos < this.win.m0 - 300 || this.win.lotS !== this.lotS)) {
+      // (Also rebuilt when a new ride starts somewhere else, so its parking lot is there.)
       this.building = { gen: this.buildWindow(f.pos), m0: f.pos };
     }
     if (this.building) {
@@ -945,13 +1095,35 @@ export class RoadView {
       return V3(p[0] * KX - w.O.x, eleAt(prof, route.total, m) - w.e0, -(p[1] * KY - w.O.y));
     };
     const m = f.pos, mps = f.kmh / 3.6;
-    const dir = toL(m + 5).sub(toL(m - 5)); dir.y = 0;
+    // In the lane: 1.9 m right of the centreline; asphalt sits 0.10 m above it and the tyres touch it.
+    const lane = (mm: number) => {
+      const d0 = toL(mm + 3).sub(toL(mm - 3)); d0.y = 0;
+      if (d0.lengthSq() < 1e-8) d0.set(0, 0, -1);
+      d0.normalize();
+      const p = toL(mm).addScaledVector(V3(-d0.z, 0, d0.x), 1.9);
+      p.y += 0.13;
+      return p;
+    };
+    // Roll-out: the first metres of a ride go from the parking-lot aisle, through the driveway, into the lane.
+    const lot = w.lotS === f.startM ? w.lot : null;
+    const riderAt = (mm: number) => {
+      const d = mm - w.lotS;
+      if (!lot || d > LOT.roll1) return lane(mm);
+      // Ride distance d maps onto the lot path from its start s to the lane at roll1.
+      const al = lot.s + Math.max(0, d) * (LOT.roll1 - lot.s) / LOT.roll1, lat = lotLat(al);
+      const p = lot.o.clone().addScaledVector(lot.t, al).addScaledVector(lot.n, lat);
+      // Lot surface height across the lot; down the driveway toward the road's height at the kerb.
+      p.y = lot.o.y + lot.y + 0.03;
+      const k = smoothstep(LOT.roll1 - 18, LOT.roll1, d), l = lane(mm);
+      p.y = THREE.MathUtils.lerp(p.y, l.y, smoothstep(LOT.l0 + 0.5, 3.8, lat));
+      return p.lerp(l, k);
+    };
+    const rp = riderAt(m);
+    const dir = riderAt(m + 2).sub(riderAt(m - 2)); dir.y = 0;
     if (dir.lengthSq() < 1e-8) dir.set(0, 0, -1);
     dir.normalize();
     const yawT = Math.atan2(-dir.x, -dir.z);
     this.yaw = this.yaw === undefined ? yawT : lerpAngle(this.yaw, yawT, Math.min(1, dt * 3.5));
-    const rn = V3(-dir.z, 0, dir.x), rp = toL(m).addScaledVector(rn, 1.9);
-    rp.y += 0.13; // asphalt sits 0.10 m above the centreline; tyres touch it
     const R = this.rider.g;
     R.position.copy(rp);
     R.rotation.set(Math.atan(f.grade) * 0.9, this.yaw, 0, "YXZ");

@@ -51,6 +51,8 @@ export interface Frame {
   elapsed: number;
   /** Cumulative route position (m). */
   pos: number;
+  /** Where this ride started (m, cumulative); before a ride, where the next one will start. */
+  startM: number;
   ghostOn: boolean;
   ghostPos: number;
   /** Ghost minus you (m): positive = ghost ahead. */
@@ -111,7 +113,7 @@ export class RideEngine extends Emitter<{ state: RideState; arrival: Stop; check
     const pos = this.d.basePos();
     return {
       state: "idle", kmh: 0, sensorKmh: 0, rpm: null, animRpm: 0, bpm: null, zone: 0, watts: null, wattsEstimated: false,
-      grade: 0, ele: 0, dist: 0, timer: 0, elapsed: 0, pos, ghostOn: false, ghostPos: pos, ghostGap: 0, speedSource: null, sim: false,
+      grade: 0, ele: 0, dist: 0, timer: 0, elapsed: 0, pos, startM: pos, ghostOn: false, ghostPos: pos, ghostGap: 0, speedSource: null, sim: false,
     };
   }
 
@@ -313,6 +315,7 @@ export class RideEngine extends Emitter<{ state: RideState; arrival: Stop; check
       timer: a?.timer ?? 0,
       elapsed: a?.elapsed ?? 0,
       pos,
+      startM: a ? a.startM : pos,
       ghostOn,
       ghostPos,
       ghostGap: ghostOn ? ghostPos - pos : 0,
