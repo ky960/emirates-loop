@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
+import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { eleAt, type ElevationProfile } from "../elevation";
 import { hav, type LngLat } from "../geo";
@@ -151,6 +152,7 @@ interface Win {
   osmState: string;
   keys: string[];
   farKeys: string[];
+  profile: ElevationProfile;
   biome: Biome;
   label: string;
 }
@@ -204,24 +206,25 @@ function makeShared() {
   });
   const std = (color: number, o: { r?: number; m?: number; x?: THREE.MeshStandardMaterialParameters } = {}) =>
     new THREE.MeshStandardMaterial({ color, roughness: o.r ?? 0.8, metalness: o.m ?? 0, ...o.x });
-  const off = (n: number) => ({ polygonOffset: true, polygonOffsetFactor: n, polygonOffsetUnits: n });
+  // Road layers are separated by real height; offsets only break ties and stay tiny so the road can never be drawn over the rider.
+  const off = (n: number) => ({ polygonOffset: true, polygonOffsetFactor: Math.sign(n) * 0.5, polygonOffsetUnits: Math.sign(n) * 1 });
   Object.assign(MAT, {
-    asph: new THREE.MeshStandardMaterial({ map: asph, roughness: 0.92, ...off(-5) }),
-    shoulder: std(0xd4b585, { r: 1, x: off(-4) }),
+    asph: new THREE.MeshStandardMaterial({ map: asph, roughness: 0.92 }),
+    shoulder: std(0xd4b585, { r: 1 }),
     white: std(0xefebe2, { r: 0.6, x: off(-6) }),
     yellow: std(0xe6b13a, { r: 0.6, x: off(-6) }),
     dash: new THREE.MeshStandardMaterial({ map: dash, transparent: true, alphaTest: 0.5, roughness: 0.6, ...off(-6) }),
-    kerb: std(0xcfcac0, { r: 0.85, x: off(-4) }),
-    median: std(0x8a9a5b, { r: 1, x: off(-4) }),
+    kerb: std(0xcfcac0, { r: 0.85 }),
+    median: std(0x8a9a5b, { r: 1 }),
     post: std(0xf2f0ea, { r: 0.6 }),
     refl: std(0xf07a1a, { r: 0.3, x: { emissive: new THREE.Color(0xf07a1a), emissiveIntensity: 0.7 } }),
     pole: std(0xb8b6b0, { r: 0.35, m: 0.7 }),
     lamp: std(0xfff4dc, { x: { emissive: new THREE.Color(0xffe7b8), emissiveIntensity: 1.6 } }),
     trunk: new THREE.MeshStandardMaterial({ map: barkTexture(), roughness: 0.95 }),
     frond: new THREE.MeshStandardMaterial({ map: frondTexture(), alphaTest: 0.45, side: THREE.DoubleSide, vertexColors: true, roughness: 0.75 }),
-    paving: new THREE.MeshStandardMaterial({ map: (() => { const t = pavingTexture(); t.repeat.set(2, 1); return t; })(), roughness: 0.9, ...off(-4) }),
+    paving: new THREE.MeshStandardMaterial({ map: (() => { const t = pavingTexture(); t.repeat.set(2, 1); return t; })(), roughness: 0.9 }),
     kerbPaint: new THREE.MeshStandardMaterial({ map: kerbTexture(), roughness: 0.7, ...off(-5) }),
-    concrete: std(0xd8d3c8, { r: 0.85 }),
+    concrete: std(0xffffff, { r: 0.85 }),
     wbeam: new THREE.MeshStandardMaterial({ map: wBeamTexture(), metalness: 0.75, roughness: 0.35, side: THREE.DoubleSide }),
     gpost: std(0x9aa1a6, { r: 0.4, m: 0.7 }),
     gantry: std(0xb9bec2, { r: 0.35, m: 0.75 }),
@@ -253,6 +256,42 @@ function makeShared() {
   GEO.tower = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 }
 const SHARED_GEOS = () => new Set(Object.values(GEO));
+
+/** Tileable PBR sets (albedo, normal, roughness) shipped with the app in /tex. */
+const PBR: Record<string, { map?: THREE.Texture; normalMap?: THREE.Texture; roughnessMap?: THREE.Texture }> = {};
+function loadPbr(onDone: () => void) {
+  const base = import.meta.env.BASE_URL + "tex/", L = new THREE.TextureLoader();
+  const sets: Array<[string, [number, number]]> = [["asphalt", [2, 2.2]], ["sand", [1, 1]], ["concrete", [1, 1]], ["paving", [3.6, 5]]];
+  let pending = sets.length * 3;
+  for (const [name, rep] of sets) {
+    const t: (typeof PBR)[string] = (PBR[name] = {});
+    for (const [k, file, srgb] of [["map", "albedo", true], ["normalMap", "normal", false], ["roughnessMap", "rough", false]] as const) {
+      L.load(base + `${name}_${file}.jpg`, (tex) => {
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(rep[0], rep[1]);
+        tex.anisotropy = 8;
+        if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+        t[k] = tex;
+        if (--pending === 0) onDone();
+      }, undefined, () => { if (--pending === 0) onDone(); });
+    }
+  }
+}
+function applyPbr() {
+  const set = (m: THREE.Material | undefined, name: string, normalScale = 1, keepMap = false) => {
+    const sm = m as THREE.MeshStandardMaterial, p = PBR[name];
+    if (!sm || !p) return;
+    if (p.map && !keepMap) sm.map = p.map;
+    if (p.normalMap) { sm.normalMap = p.normalMap; sm.normalScale = new THREE.Vector2(normalScale, normalScale); }
+    if (p.roughnessMap) { sm.roughnessMap = p.roughnessMap; sm.roughness = 1; }
+    sm.needsUpdate = true;
+  };
+  set(MAT.asph, "asphalt", 0.9);
+  set(MAT.shoulder, "asphalt", 0.6);
+  set(MAT.concrete, "concrete", 0.8);
+  set(MAT.paving, "paving", 1.0);
+  set(MAT.kerb, "concrete", 0.6);
+}
 /** How strongly each surface picks up the sky's image-based light; glass and metal reflect most. */
 function tuneEnv() {
   for (const [k, m] of Object.entries(MAT)) {
@@ -404,20 +443,16 @@ export class RoadView {
     s.add(sky);
     this.sky = sky;
     s.fog = new THREE.FogExp2(0xe6d3b8, 0.0003);
-    // Image-based lighting from the same sky, so glass reflects it and shade picks up its colour.
-    try {
-      const pm = new THREE.PMREMGenerator(this.renderer), envScene = new THREE.Scene(), sky2 = new Sky();
-      sky2.scale.setScalar(1000);
-      const u2 = sky2.material.uniforms;
-      u2.turbidity.value = 4.5; u2.rayleigh.value = 2.4; u2.mieCoefficient.value = 0.004; u2.mieDirectionalG.value = 0.88;
-      u2.sunPosition.value.set(-0.6, 0.28, -0.75).normalize();
-      envScene.add(sky2);
-      const ground = new THREE.Mesh(new THREE.CircleGeometry(4000, 16), new THREE.MeshBasicMaterial({ color: 0xb8956a }));
-      ground.rotation.x = -Math.PI / 2; ground.position.y = -20;
-      envScene.add(ground);
-      s.environment = pm.fromScene(envScene, 0.04, 1, 5000).texture;
+    // Image-based lighting from a real sunny-sky HDRI (Poly Haven "Quarry 01", CC0) for natural ambient light and reflections.
+    const pm = new THREE.PMREMGenerator(this.renderer);
+    new RGBELoader().load(import.meta.env.BASE_URL + "env/quarry_01_1k.hdr", (hdr) => {
+      hdr.mapping = THREE.EquirectangularReflectionMapping;
+      s.environment = pm.fromEquirectangular(hdr).texture;
+      hdr.dispose();
       pm.dispose();
-    } catch { /* no IBL: hemisphere light still lights the scene */ }
+      this.hemi.intensity = 0.15;
+    }, undefined, () => pm.dispose());
+    loadPbr(() => applyPbr());
     this.hemi = new THREE.HemisphereLight(0xfff0dc, 0x9a7a58, 0.55);
     s.add(this.hemi);
     const sun = new THREE.DirectionalLight(0xffdfb8, 2.5);
@@ -473,7 +508,7 @@ export class RoadView {
     if (ctx.state !== "complete" && ctx.state !== "none") this.deps.osm.fetch(keys).then(() => this.osmArrived(m0));
     // Wider, lower-detail tiles for the distant skyline (towers several kilometres away).
     const farTiles = q.skyline && this.deps.osmFar ? this.deps.osmFar : null;
-    const farKeys = farTiles ? farTiles.keysFor(C.filter((_, i) => i % 25 === 0).map((v) => [(v.x + O.x) / KX, (-v.z + O.y) / KY] as LngLat), 0.04) : [];
+    const farKeys = farTiles ? farTiles.keysFor(C.filter((_, i) => i % 25 === 0).map((v) => [(v.x + O.x) / KX, (-v.z + O.y) / KY] as LngLat), 0.032) : [];
     const far = farTiles ? farTiles.get(farKeys) : { state: "none" as const, data: null };
     if (farTiles && far.state !== "complete" && far.state !== "none") farTiles.fetch(farKeys).then(() => this.osmArrived(m0));
     yield;
@@ -543,8 +578,17 @@ export class RoadView {
     geo.computeVertexNormals();
     const tm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: hb === "mountains" });
     tm.userData.own = true;
-    tm.envMapIntensity = 0.3;
-    if (cb === "desert") { tm.normalMap = (MAT._ripple as THREE.MeshBasicMaterial).map; tm.normalScale = new THREE.Vector2(0.6, 0.6); }
+    tm.envMapIntensity = 0.35;
+    tm.polygonOffset = true; tm.polygonOffsetFactor = 1; tm.polygonOffsetUnits = 2;
+    if (cb === "desert" || cb === "oasis" || hb === "mountains") {
+      const sand = PBR.sand;
+      if (sand?.normalMap) {
+        // Sand normal/roughness tiled every ~6 m across the 4.4 km terrain patch.
+        const nm = sand.normalMap.clone(); nm.repeat.set(SZ / 6, SZ / 6); nm.needsUpdate = true;
+        tm.normalMap = nm; tm.normalScale = new THREE.Vector2(cb === "desert" ? 0.9 : 0.5, cb === "desert" ? 0.9 : 0.5);
+        tm.userData.ownMap = true;
+      } else { tm.normalMap = (MAT._ripple as THREE.MeshBasicMaterial).map; tm.normalScale = new THREE.Vector2(0.6, 0.6); }
+    }
     const terr = new THREE.Mesh(geo, tm);
     terr.receiveShadow = true;
     add(terr);
@@ -556,7 +600,7 @@ export class RoadView {
       for (const b of far.data.b) {
         if (b.h < 40) continue;
         const v = toL(b.rings[0][0]), nr = near.query(v.x, v.z);
-        if (nr.d < (b.h > 60 ? 1600 : 650) || nr.d > 5200) continue;
+        if (nr.d < (b.h > 60 ? 1600 : 650) || nr.d > 4500) continue;
         const k = Math.round(v.x / 4) + "," + Math.round(v.z / 4);
         if (seen.has(k)) continue;
         seen.add(k);
@@ -671,7 +715,7 @@ export class RoadView {
     }
     const label = BIOME_LABEL[pb] + (scen?.buildings ? ` · ${scen.buildings} buildings from OpenStreetMap` : "");
     const osmState = ctx.state === "none" ? "none" : ctx.state === "complete" && (far.state === "complete" || far.state === "none") ? "complete" : "partial";
-    return { group, m0, O, e0, route, osmState, keys, farKeys, biome: pb, label };
+    return { group, m0, O, e0, route, osmState, keys, farKeys, profile: prof, biome: pb, label };
   }
 
   private osmArrived(m0: number) {
@@ -754,7 +798,7 @@ export class RoadView {
     if (!this.ready) return;
     const route = this.deps.route();
     // Build windows ahead of need, a few milliseconds per frame.
-    if (!this.win || this.win.route !== route) {
+    if (!this.win || this.win.route !== route || this.win.profile !== this.deps.profile()) {
       if (this.win) this.dropWin();
       const gen = this.buildWindow(f.pos);
       let r = gen.next();
@@ -784,7 +828,7 @@ export class RoadView {
     const yawT = Math.atan2(-dir.x, -dir.z);
     this.yaw = this.yaw === undefined ? yawT : lerpAngle(this.yaw, yawT, Math.min(1, dt * 3.5));
     const rn = V3(-dir.z, 0, dir.x), rp = toL(m).addScaledVector(rn, 1.9);
-    rp.y += 0.1;
+    rp.y += 0.13; // asphalt sits 0.10 m above the centreline; tyres touch it
     const R = this.rider.g;
     R.position.copy(rp);
     R.rotation.set(Math.atan(f.grade) * 0.9, this.yaw, 0, "YXZ");
@@ -848,8 +892,8 @@ export class RoadView {
       const mesh = o as THREE.Mesh;
       if ((o as THREE.InstancedMesh).isInstancedMesh) { (o as THREE.InstancedMesh).dispose(); return; }
       if (mesh.geometry && !shared.has(mesh.geometry)) mesh.geometry.dispose();
-      const mat = mesh.material as THREE.Material & { map?: THREE.Texture };
-      if (mat?.userData?.ownMap && mat.map) mat.map.dispose();
+      const mat = mesh.material as THREE.Material & { map?: THREE.Texture | null };
+      if (mat?.userData?.ownMap) { mat.map?.dispose(); (mat as THREE.MeshStandardMaterial).normalMap?.dispose(); }
       if (mat?.userData?.own) mat.dispose();
     });
     this.win = null;
@@ -890,7 +934,7 @@ function polyMesh(polys: Array<{ rings: LngLat[][]; color: number }>, toMap: (p:
   g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
   g.computeVertexNormals();
-  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: mo.r ?? 0.95, metalness: mo.m ?? 0, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset });
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: mo.r ?? 0.95, metalness: mo.m ?? 0, polygonOffset: true, polygonOffsetFactor: 1 - offset * 0.2, polygonOffsetUnits: 2 });
   m.userData.own = true;
   const mesh = new THREE.Mesh(g, m);
   mesh.receiveShadow = true;
@@ -1009,7 +1053,7 @@ function roadMeshes(roads: OsmData["r"], toL: (p: LngLat, y?: number) => THREE.V
   try { merged = mergeGeometries(geos); } catch { return null; }
   geos.forEach((g) => g.dispose());
   if (!merged) return null;
-  const m = new THREE.MeshStandardMaterial({ color: 0x66656a, roughness: 0.92, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+  const m = new THREE.MeshStandardMaterial({ color: 0x66656a, roughness: 0.92, polygonOffset: true, polygonOffsetFactor: 0.5, polygonOffsetUnits: 1 });
   m.userData.own = true;
   const mesh = new THREE.Mesh(merged, m);
   mesh.receiveShadow = true;

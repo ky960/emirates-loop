@@ -40,7 +40,8 @@ const engine = new RideEngine({
   ghost: () => ghost,
 });
 const osm = new OsmTiles(14);
-const osmFar = new OsmTiles(13);
+// The skyline needs building heights, which only the z14 tiles carry; share one cache.
+const osmFar = osm;
 const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm, osmFar });
 const mapView = new MapView($("map"), () => settings);
 const audio = new RideAudio();

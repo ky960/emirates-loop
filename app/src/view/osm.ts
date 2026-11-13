@@ -87,7 +87,7 @@ export class OsmTiles {
       }
       this.cache.set(key, data);
       this.inflight.delete(key);
-      if (this.cache.size > 80) this.cache.delete(this.cache.keys().next().value!);
+      if (this.cache.size > 160) this.cache.delete(this.cache.keys().next().value!);
       return data;
     })();
     this.inflight.set(key, p);

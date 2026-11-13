@@ -44,3 +44,8 @@ Both share the same origin, so the new app imports the old app's settings and ri
 ## Map data
 
 © OpenStreetMap contributors via OpenFreeMap and OpenMapTiles · routing by OSRM · terrain from open elevation tiles on AWS (Mapzen) · offline fallback: Natural Earth (public domain).
+
+## Asset credits
+
+- `app/public/env/quarry_01_1k.hdr`: "Quarry 01" HDRI by Poly Haven (CC0), via the three.js examples.
+- `app/public/tex/*`: procedurally generated for this app (CC0).
