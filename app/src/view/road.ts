@@ -1,0 +1,811 @@
+import * as THREE from "three";
+import { Sky } from "three/examples/jsm/objects/Sky.js";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { eleAt, type ElevationProfile } from "../elevation";
+import { hav, type LngLat } from "../geo";
+import type { Frame } from "../ride/engine";
+import type { Route } from "../route";
+import { CITY_AR, nextStop, pointAt, wrapM } from "../route";
+import type { Quality, Settings } from "../store/settings";
+import { clamp, D2R, hash01, rng, smoothstep, TAU } from "../util";
+import type { OsmData, OsmTiles } from "./osm";
+import { buildRider, type RiderModel } from "./rider";
+
+type Biome = "desert" | "city" | "mountains" | "oasis" | "flat";
+const V3 = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+const UP = V3(0, 1, 0);
+const KX = Math.cos(24.8 * D2R) * 111320, KY = 110574;
+const BIOME_LABEL: Record<Biome, string> = { desert: "Desert highway", city: "City", mountains: "Hajar mountains", oasis: "Al Ain oasis", flat: "Coast" };
+
+const QUALITY: Record<Quality, { grid: number; shadow: number; dpr: number; buildings: number; palms: number }> = {
+  battery: { grid: 96, shadow: 0, dpr: 1, buildings: 700, palms: 160 },
+  balanced: { grid: 140, shadow: 1024, dpr: 1.25, buildings: 1800, palms: 300 },
+  max: { grid: 170, shadow: 2048, dpr: 1.6, buildings: 2600, palms: 380 },
+};
+
+const lerpAngle = (a: number, b: number, t: number) => a + (((((b - a) % TAU) + TAU * 1.5) % TAU) - Math.PI) * t;
+
+// ---------- terrain shape ----------
+function hDesert(gx: number, gz: number) {
+  const w = gx * 0.011 + 1.3 * Math.sin(gz * 0.0037) + 0.6 * Math.sin(gz * 0.011 + gx * 0.002);
+  const crest = Math.pow(1 - Math.abs(Math.sin(w)), 2);
+  return 10 * crest * (0.6 + 0.4 * Math.sin(gx * 0.0021 + gz * 0.0017)) + 4 * (0.5 + 0.5 * Math.sin(gx * 0.0043 - gz * 0.0051)) + 0.6 * Math.sin(gx * 0.07) * Math.sin(gz * 0.061);
+}
+function hMount(gx: number, gz: number) {
+  const r1 = Math.pow(1 - Math.abs(Math.sin(gx * 0.0031 + gz * 0.0019 + 0.8 * Math.sin(gz * 0.0013))), 1.6);
+  const r2 = Math.pow(1 - Math.abs(Math.sin(gx * 0.0072 - gz * 0.0058 + 1.7)), 2.2);
+  return 190 * r1 + 80 * r2 + 12 * (0.5 + 0.5 * Math.sin(gx * 0.019 + gz * 0.023)) + 4 * Math.sin(gx * 0.09) * Math.sin(gz * 0.077);
+}
+/** Height above the nearest road point for a spot `d` metres from the road. */
+function heightAt(b: Biome, gx: number, gz: number, d: number) {
+  const sink = d < 30 ? -0.35 : 0;
+  if (b === "desert") return sink + hDesert(gx, gz) * smoothstep(30, 85, d) + 6 * smoothstep(250, 900, d) * (0.5 + 0.5 * Math.sin(gx * 0.0009 + gz * 0.0007));
+  if (b === "mountains") return sink + hMount(gx, gz) * smoothstep(32, 300, d) + Math.max(0, d - 30) * 0.015 + hDesert(gx, gz) * 0.25 * smoothstep(30, 60, d);
+  if (b === "oasis") return sink + hDesert(gx, gz) * 0.7 * smoothstep(160, 520, d) + 0.25 * Math.sin(gx * 0.05) * Math.sin(gz * 0.04) * smoothstep(30, 45, d);
+  if (b === "flat") return sink + 0.02 * Math.sin(gx * 0.03) * Math.sin(gz * 0.027) * smoothstep(30, 45, d);
+  return sink + 0.03 * Math.sin(gx * 0.03) * Math.sin(gz * 0.027) * smoothstep(30, 45, d) + hDesert(gx, gz) * 0.4 * smoothstep(900, 1400, d);
+}
+function colorAt(b: Biome, h: number, d: number, n: number) {
+  const c = new THREE.Color();
+  if (b === "desert") c.set(0xd7ae78).lerp(new THREE.Color(0xf4ddb2), clamp(h / 12, 0, 1));
+  else if (b === "mountains") { c.set(0xc29a72); if (h > 6) c.lerp(new THREE.Color(0x6a4636), clamp((h - 6) / 50, 0, 1)).lerp(new THREE.Color(0xa88e7a), clamp((h - 60) / 150, 0, 1)); }
+  else if (b === "oasis") { c.set(0x5a8a3e).lerp(new THREE.Color(0x86a452), n); c.lerp(new THREE.Color(0xddbe8c), smoothstep(70, 200, d)); }
+  else { c.set(0xd6cbb8).lerp(new THREE.Color(0x7e9a5a), d < 24 ? 0.85 : n > 0.72 && d < 120 ? 0.7 : 0); c.lerp(new THREE.Color(0xe0c597), smoothstep(700, 1300, d)); }
+  c.offsetHSL(0, 0, (n - 0.5) * 0.03);
+  return c;
+}
+function zoneAt(p: LngLat, ele: number): Biome {
+  const near = (c: LngLat, km: number) => hav(p, c) < km * 1000;
+  if (near([55.7447, 24.2075], 16)) return "oasis";
+  if (near([54.3705, 24.4764], 11) || near([54.6, 24.49], 4) || near([55.1403, 25.0805], 8) || near([55.2, 25.11], 6) || near([55.2708, 25.2048], 9) || near([55.4033, 25.3463], 7) || near([55.03, 24.99], 5)) return "city";
+  if (ele > 160 || p[0] > 55.93) return "mountains";
+  return "desert";
+}
+
+// ---------- geometry helpers ----------
+function rTex(w: number, h: number, draw: (c: CanvasRenderingContext2D, w: number, h: number) => void, srgb = true) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  draw(cv.getContext("2d")!, w, h);
+  const t = new THREE.CanvasTexture(cv);
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 8;
+  return t;
+}
+
+/** Strip along the centreline C between lateral offsets o0..o1, following the road's height plus `y`. */
+function ribbon(C: THREE.Vector3[], o0: number, o1: number, y: number, vLen: number) {
+  const n = C.length, pos = new Float32Array(n * 6), uv = new Float32Array(n * 4), idx: number[] = [];
+  let acc = 0;
+  const pt = V3(0, 0, -1);
+  for (let i = 0; i < n; i++) {
+    const a = C[Math.max(0, i - 1)], b = C[Math.min(n - 1, i + 1)], t = b.clone().sub(a);
+    t.y = 0;
+    if (t.lengthSq() < 1e-8) t.copy(pt); else t.normalize();
+    pt.copy(t);
+    const nx = -t.z, nz = t.x;
+    if (i) acc += C[i].distanceTo(C[i - 1]);
+    const p = C[i];
+    pos.set([p.x + nx * o0, p.y + y, p.z + nz * o0, p.x + nx * o1, p.y + y, p.z + nz * o1], i * 6);
+    uv.set([0, acc / vLen, 1, acc / vLen], i * 4);
+    if (i < n - 1) { const k = i * 2; idx.push(k, k + 1, k + 2, k + 1, k + 3, k + 2); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+interface Item { x: number; y: number; z: number; s?: number; sx?: number; sy?: number; sz?: number; rx?: number; ry?: number; rz?: number; c?: number }
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3(), _e = new THREE.Euler();
+function inst(geo: THREE.BufferGeometry, mat: THREE.Material, items: Item[], shadow = true) {
+  if (!items.length) return null;
+  const im = new THREE.InstancedMesh(geo, mat, items.length);
+  items.forEach((it, i) => {
+    _e.set(it.rx || 0, it.ry || 0, it.rz || 0);
+    _q.setFromEuler(_e);
+    _s.set(it.sx ?? it.s ?? 1, it.sy ?? it.s ?? 1, it.sz ?? it.s ?? 1);
+    _m.compose(_p.set(it.x, it.y, it.z), _q, _s);
+    im.setMatrixAt(i, _m);
+    if (it.c !== undefined) im.setColorAt(i, new THREE.Color(it.c));
+  });
+  im.castShadow = shadow;
+  im.receiveShadow = true;
+  im.frustumCulled = false;
+  im.instanceMatrix.needsUpdate = true;
+  if (im.instanceColor) im.instanceColor.needsUpdate = true;
+  return im;
+}
+
+function ringArea(r: THREE.Vector2[]) {
+  let s = 0;
+  for (let i = 0; i < r.length; i++) { const a = r[i], b = r[(i + 1) % r.length]; s += a.x * b.y - b.x * a.y; }
+  return s / 2;
+}
+
+/** Nearest centreline point: coarse pass over every 8th point, then refine locally. */
+class Nearest {
+  private coarse: number[] = [];
+  constructor(private C: THREE.Vector3[]) { for (let i = 0; i < C.length; i += 8) this.coarse.push(i); }
+  query(x: number, z: number): { i: number; d: number } {
+    const C = this.C;
+    let bi = 0, bq = Infinity;
+    for (const i of this.coarse) { const dx = C[i].x - x, dz = C[i].z - z, q = dx * dx + dz * dz; if (q < bq) { bq = q; bi = i; } }
+    const lo = Math.max(0, bi - 9), hi = Math.min(C.length - 1, bi + 9);
+    for (let i = lo; i <= hi; i++) { const dx = C[i].x - x, dz = C[i].z - z, q = dx * dx + dz * dz; if (q < bq) { bq = q; bi = i; } }
+    return { i: bi, d: Math.sqrt(bq) };
+  }
+}
+
+interface Win {
+  group: THREE.Group;
+  m0: number;
+  O: { x: number; y: number };
+  e0: number;
+  route: Route;
+  osmState: string;
+  keys: string[];
+  biome: Biome;
+  label: string;
+}
+
+// ---------- shared materials ----------
+const MAT: Record<string, THREE.Material> = {};
+const GEO: Record<string, THREE.BufferGeometry> = {};
+let facadeTex: THREE.Texture | null = null;
+
+function makeShared() {
+  if (GEO.post) return;
+  const asph = rTex(256, 512, (c, w, h) => {
+    c.fillStyle = "#5E5D62"; c.fillRect(0, 0, w, h);
+    let s = 11; const r = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
+    for (let i = 0; i < 26000; i++) { const v = (70 + r() * 46) | 0; c.fillStyle = `rgba(${v + 3},${v},${v - 2},${0.2 + r() * 0.35})`; c.fillRect(r() * w, r() * h, 1 + r() * 1.6, 1 + r() * 1.6); }
+    c.fillStyle = "rgba(20,20,24,.14)"; c.fillRect(w * 0.16, 0, w * 0.12, h); c.fillRect(w * 0.66, 0, w * 0.12, h);
+    c.fillStyle = "rgba(255,255,255,.05)"; c.fillRect(w * 0.47, 0, w * 0.06, h);
+  });
+  const dash = rTex(16, 64, (c, w, h) => { c.clearRect(0, 0, w, h); c.fillStyle = "#F4F1E8"; c.fillRect(0, 0, w, h * 0.4); });
+  const ripple = (() => {
+    const N = 256, cv = document.createElement("canvas"); cv.width = cv.height = N;
+    const c = cv.getContext("2d")!, img = c.createImageData(N, N), hg = new Float32Array(N * N);
+    let s = 5; const r = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { const u = x / N, v = y / N; hg[y * N + x] = Math.sin(TAU * (u * 8 + 0.4 * Math.sin(TAU * v * 2))) * 0.6 + Math.sin(TAU * (u * 21 + v * 3)) * 0.2 + (r() - 0.5) * 0.25; }
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const L = hg[y * N + ((x - 1 + N) % N)], R2 = hg[y * N + ((x + 1) % N)], D2 = hg[((y - 1 + N) % N) * N + x], U = hg[((y + 1) % N) * N + x];
+      const nx = (L - R2) * 1.3, ny = (D2 - U) * 1.3, l = Math.hypot(nx, ny, 1), i = (y * N + x) * 4;
+      img.data[i] = ((nx / l) * 0.5 + 0.5) * 255; img.data[i + 1] = ((ny / l) * 0.5 + 0.5) * 255; img.data[i + 2] = ((1 / l) * 0.5 + 0.5) * 255; img.data[i + 3] = 255;
+    }
+    c.putImageData(img, 0, 0);
+    const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(160, 160); return t;
+  })();
+  MAT._ripple = new THREE.MeshBasicMaterial({ map: ripple }); // holder so the texture is shared
+  const win = rTex(64, 256, (c, w, h) => {
+    c.fillStyle = "#E6E9EC"; c.fillRect(0, 0, w, h);
+    const r = rng(42);
+    for (let y = 4; y < h; y += 10) for (let x = 3; x < w; x += 8) { c.fillStyle = r() > 0.2 ? "rgba(70,105,135,.55)" : "rgba(255,226,170,.75)"; c.fillRect(x, y, 5, 6); }
+  });
+  facadeTex = rTex(64, 64, (c, w, h) => {
+    c.fillStyle = "#F4F1EB"; c.fillRect(0, 0, w, h);
+    for (let r = 0; r < 4; r++) for (let q = 0; q < 4; q++) { c.fillStyle = (r * 7 + q * 3) % 11 === 0 ? "rgba(255,214,150,.85)" : "rgba(64,96,128,.62)"; c.fillRect(q * 16 + 3, r * 16 + 3, 10, 10); }
+  });
+  const std = (color: number, o: { r?: number; m?: number; x?: THREE.MeshStandardMaterialParameters } = {}) =>
+    new THREE.MeshStandardMaterial({ color, roughness: o.r ?? 0.8, metalness: o.m ?? 0, ...o.x });
+  const off = (n: number) => ({ polygonOffset: true, polygonOffsetFactor: n, polygonOffsetUnits: n });
+  Object.assign(MAT, {
+    asph: new THREE.MeshStandardMaterial({ map: asph, roughness: 0.92, ...off(-5) }),
+    shoulder: std(0xd4b585, { r: 1, x: off(-4) }),
+    white: std(0xefebe2, { r: 0.6, x: off(-6) }),
+    yellow: std(0xe6b13a, { r: 0.6, x: off(-6) }),
+    dash: new THREE.MeshStandardMaterial({ map: dash, transparent: true, alphaTest: 0.5, roughness: 0.6, ...off(-6) }),
+    kerb: std(0xcfcac0, { r: 0.85, x: off(-4) }),
+    median: std(0x8a9a5b, { r: 1, x: off(-4) }),
+    post: std(0xf2f0ea, { r: 0.6 }),
+    refl: std(0xf07a1a, { r: 0.3, x: { emissive: new THREE.Color(0xf07a1a), emissiveIntensity: 0.7 } }),
+    pole: std(0xb8b6b0, { r: 0.35, m: 0.7 }),
+    lamp: std(0xfff4dc, { x: { emissive: new THREE.Color(0xffe7b8), emissiveIntensity: 1.6 } }),
+    trunk: std(0x8a6a48, { r: 0.95 }),
+    frond: std(0x5f9a42, { r: 0.8, x: { side: THREE.DoubleSide } }),
+    ghafT: std(0x6a4e36, { r: 0.95 }),
+    ghafC: std(0x6f7f3f, { r: 0.95, x: { flatShading: true } }),
+    shrub: std(0x9a9257, { r: 1, x: { flatShading: true } }),
+    rock: std(0x8a6a55, { r: 0.95, x: { flatShading: true } }),
+    tower: new THREE.MeshStandardMaterial({ map: win, roughness: 0.5, metalness: 0.1, emissive: new THREE.Color(0x4a4640), emissiveMap: win }),
+    sign: std(0x8e8e8a, { r: 0.5, m: 0.5 }),
+  });
+  GEO.post = new THREE.BoxGeometry(0.1, 0.95, 0.1).translate(0, 0.475, 0);
+  GEO.refl = new THREE.BoxGeometry(0.105, 0.14, 0.105).translate(0, 0.82, 0);
+  GEO.pole = new THREE.CylinderGeometry(0.08, 0.13, 1, 8).translate(0, 0.5, 0);
+  GEO.arm = new THREE.BoxGeometry(0.08, 0.08, 1).translate(0, 0, 0.5);
+  GEO.lamp = new THREE.BoxGeometry(0.38, 0.14, 1);
+  GEO.trunk = new THREE.CylinderGeometry(0.15, 0.24, 1, 7).translate(0, 0.5, 0);
+  GEO.crown = (() => {
+    const parts: THREE.BufferGeometry[] = [];
+    for (let i = 0; i < 13; i++) {
+      const g = new THREE.ConeGeometry(0.78, 3.6, 4);
+      g.translate(0, 1.8, 0); g.scale(0.3, 1, 1);
+      const m = new THREE.Matrix4().makeRotationY((i / 13) * TAU + (i % 2) * 0.2).multiply(new THREE.Matrix4().makeRotationZ(-(Math.PI / 2 - 0.35 - (i % 3) * 0.22)));
+      g.applyMatrix4(m); parts.push(g);
+    }
+    return mergeGeometries(parts);
+  })();
+  GEO.ghafT = new THREE.CylinderGeometry(0.12, 0.2, 1, 6).translate(0, 0.5, 0);
+  GEO.ghafC = new THREE.IcosahedronGeometry(1, 1);
+  GEO.shrub = new THREE.IcosahedronGeometry(1, 0);
+  GEO.rock = new THREE.DodecahedronGeometry(1, 0);
+  GEO.tower = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+}
+const SHARED_GEOS = () => new Set(Object.values(GEO));
+
+function signBoard(name: string, km: number) {
+  return rTex(512, 256, (c, w, h) => {
+    c.fillStyle = "#0B6A3A"; c.fillRect(0, 0, w, h);
+    c.strokeStyle = "#F4F4EF"; c.lineWidth = 9; c.strokeRect(12, 12, w - 24, h - 24);
+    c.fillStyle = "#F7F7F2"; c.textBaseline = "middle"; c.textAlign = "left";
+    if (CITY_AR[name]) { c.font = "600 60px 'Noto Naskh Arabic', 'Segoe UI', Tahoma, sans-serif"; c.fillText(CITY_AR[name], 40, h * 0.33); }
+    c.font = `700 ${name.length > 8 ? 54 : 64}px Barlow, Arial, sans-serif`;
+    c.fillText(name.toUpperCase(), 40, CITY_AR[name] ? h * 0.7 : h * 0.5);
+    c.fillRect(w - 168, 40, 5, h - 80);
+    c.font = "700 92px 'Barlow Condensed', 'Arial Narrow', sans-serif"; c.textAlign = "right";
+    c.fillText(String(km), w - 32, h * 0.52);
+  });
+}
+
+// =====================================================================================
+export class RoadView {
+  ready = false;
+  info = "";
+  private renderer!: THREE.WebGLRenderer;
+  private scene!: THREE.Scene;
+  private cam!: THREE.PerspectiveCamera;
+  private sky!: Sky;
+  private sun!: THREE.DirectionalLight;
+  private hemi!: THREE.HemisphereLight;
+  private base!: THREE.Mesh;
+  private rider!: RiderModel;
+  private ghost!: RiderModel;
+  private win: Win | null = null;
+  private building: { gen: Generator<void, Win, void>; m0: number } | null = null;
+  private yaw: number | undefined;
+  private camOff: THREE.Vector3 | null = null;
+  private lookOff: THREE.Vector3 | null = null;
+  private t = 0;
+  private quality: Quality;
+
+  constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles }) {
+    this.quality = deps.settings().quality;
+  }
+
+  init(): boolean {
+    try {
+      const q = QUALITY[this.quality];
+      const r = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: this.quality !== "battery", powerPreference: "high-performance" });
+      r.setPixelRatio(Math.min(q.dpr, devicePixelRatio || 1));
+      r.shadowMap.enabled = q.shadow > 0;
+      r.shadowMap.type = THREE.PCFSoftShadowMap;
+      r.toneMapping = THREE.ACESFilmicToneMapping;
+      r.toneMappingExposure = 0.82;
+      r.outputColorSpace = THREE.SRGBColorSpace;
+      this.renderer = r;
+    } catch {
+      return false;
+    }
+    makeShared();
+    const s = new THREE.Scene();
+    this.scene = s;
+    const sky = new Sky();
+    sky.scale.setScalar(25000);
+    const u = sky.material.uniforms;
+    u.turbidity.value = 4.5; u.rayleigh.value = 2.4; u.mieCoefficient.value = 0.004; u.mieDirectionalG.value = 0.88;
+    s.add(sky);
+    this.sky = sky;
+    s.fog = new THREE.FogExp2(0xe9d2b4, 0.00055);
+    this.hemi = new THREE.HemisphereLight(0xfff0dc, 0x9a7a58, 1.25);
+    s.add(this.hemi);
+    const sun = new THREE.DirectionalLight(0xffdfb8, 2.5);
+    const q = QUALITY[this.quality];
+    if (q.shadow) {
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(q.shadow, q.shadow);
+      Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10, near: 1, far: 140 });
+      sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03; sun.shadow.radius = 3;
+    }
+    s.add(sun, sun.target);
+    this.sun = sun;
+    const base = new THREE.Mesh(new THREE.CircleGeometry(14000, 64), new THREE.MeshStandardMaterial({ color: 0xddb98a, roughness: 1 }));
+    base.rotation.x = -Math.PI / 2;
+    s.add(base);
+    this.base = base;
+    this.cam = new THREE.PerspectiveCamera(52, 1, 0.3, 30000);
+    this.rider = buildRider();
+    this.rider.g.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
+    s.add(this.rider.g);
+    this.ghost = buildRider(new THREE.MeshBasicMaterial({ color: 0x18d6c8, transparent: true, opacity: 0.5, depthWrite: false }));
+    s.add(this.ghost.g);
+    this.ready = true;
+    return true;
+  }
+
+  resize(w: number, h: number) {
+    if (!this.ready) return;
+    this.renderer.setSize(Math.max(200, w), Math.max(150, h), false);
+    this.cam.aspect = w / h;
+    this.cam.fov = w / h < 1.1 ? 66 : 52;
+    this.cam.updateProjectionMatrix();
+  }
+
+  get biome(): string { return this.win ? BIOME_LABEL[this.win.biome] : ""; }
+
+  // ---------- window building (incremental) ----------
+  private *buildWindow(m0: number): Generator<void, Win, void> {
+    const route = this.deps.route(), prof = this.deps.profile(), q = QUALITY[this.quality];
+    const group = new THREE.Group();
+    const add = (o: THREE.Object3D | null) => { if (o) group.add(o); };
+    const op = pointAt(route, m0).p, O = { x: op[0] * KX, y: op[1] * KY };
+    const e0 = eleAt(prof, route.total, m0);
+    const toL = (p: LngLat, y = 0) => V3(p[0] * KX - O.x, y, -(p[1] * KY - O.y));
+    const A = -500, B = 2700, STEP = 6, C: THREE.Vector3[] = [];
+    for (let d = A; d <= B; d += STEP) C.push(toL(pointAt(route, m0 + d).p, eleAt(prof, route.total, m0 + d) - e0));
+    const near = new Nearest(C);
+    const zoneP = pointAt(route, m0 + 500).p, zoneEle = eleAt(prof, route.total, m0 + 500);
+    const zone = zoneAt(zoneP, zoneEle);
+    const keys = this.deps.osm.keysFor(C.filter((_, i) => i % 25 === 0).map((v) => [(v.x + O.x) / KX, (-v.z + O.y) / KY] as LngLat));
+    const ctx = this.deps.osm.get(keys);
+    if (ctx.state !== "complete" && ctx.state !== "none") this.deps.osm.fetch(keys).then(() => this.osmArrived(m0));
+    yield;
+
+    let scen: ReturnType<RoadView["scenery"]> | null = null;
+    if (ctx.data) { try { scen = this.scenery(ctx.data, toL, near, C, zone, q); } catch (e) { console.error(e); } }
+    const urban = !!scen && scen.buildings >= 40;
+    const mountainous = zone === "mountains";
+    let hb: Biome, cb: Biome, pb: Biome;
+    if (urban) { pb = cb = "city"; hb = mountainous ? "mountains" : scen!.water ? "flat" : "city"; }
+    else if (scen) { pb = cb = zone === "city" ? "desert" : zone; hb = scen.water && !mountainous ? "flat" : pb; }
+    else { hb = cb = pb = zone; }
+    yield;
+
+    const along = (d: number) => {
+      const i = clamp(Math.round((d - A) / STEP), 1, C.length - 2), t = C[i + 1].clone().sub(C[i - 1]);
+      t.y = 0;
+      if (t.lengthSq() < 1e-8) t.set(0, 0, -1);
+      t.normalize();
+      return { p: C[i], t, n: V3(-t.z, 0, t.x), i };
+    };
+    const clear = (pt: THREE.Vector3, minD: number, i0: number) => {
+      for (let k = Math.max(0, i0 - 45); k < Math.min(C.length, i0 + 45); k++) { const dx = C[k].x - pt.x, dz = C[k].z - pt.z; if (dx * dx + dz * dz < minD * minD) return false; }
+      return true;
+    };
+    const mk = (geo: THREE.BufferGeometry, mat: THREE.Material) => { const m = new THREE.Mesh(geo, mat); m.receiveShadow = true; return m; };
+    // Road surface, shoulders, kerbs and markings follow the real elevation.
+    add(mk(ribbon(C, -3.8, 3.8, 0.1, 9), MAT.asph));
+    if (pb === "city") {
+      add(mk(ribbon(C, -6.6, -3.8, 0.08, 9), MAT.asph)); add(mk(ribbon(C, 3.8, 6.6, 0.08, 9), MAT.asph));
+      add(mk(ribbon(C, -7.0, -6.6, 0.22, 9), MAT.kerb)); add(mk(ribbon(C, 6.6, 7.0, 0.22, 9), MAT.kerb));
+      add(mk(ribbon(C, -3.62, -3.46, 0.14, 9), MAT.white)); add(mk(ribbon(C, 3.46, 3.62, 0.14, 9), MAT.white));
+      add(mk(ribbon(C, -9.6, -7.0, 0.2, 9), MAT.median));
+    } else {
+      add(mk(ribbon(C, -6.6, -3.8, 0.08, 9), MAT.shoulder)); add(mk(ribbon(C, 3.8, 6.6, 0.08, 9), MAT.shoulder));
+      add(mk(ribbon(C, -3.62, -3.46, 0.14, 9), MAT.yellow)); add(mk(ribbon(C, 3.46, 3.62, 0.14, 9), MAT.white));
+    }
+    add(mk(ribbon(C, -0.11, 0.11, 0.14, 12), MAT.dash));
+    yield;
+
+    // Terrain grid: height = nearest road height + biome shape by distance from the road.
+    const mid = along(1000).p, SZ = 3400, N = q.grid;
+    const geo = new THREE.PlaneGeometry(SZ, SZ, N, N);
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(mid.x, 0, mid.z);
+    const pos = geo.attributes.position as THREE.BufferAttribute, cols = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), z = pos.getZ(i), nr = near.query(x, z);
+      const gx = x + O.x, gz = z - O.y, h = heightAt(hb, gx, gz, nr.d), n = 0.5 + 0.5 * Math.sin(gx * 0.013) * Math.sin(gz * 0.017);
+      pos.setY(i, C[nr.i].y + h - 0.02);
+      const c = colorAt(cb, h, nr.d, n);
+      cols[i * 3] = c.r; cols[i * 3 + 1] = c.g; cols[i * 3 + 2] = c.b;
+      if (i % ((N + 1) * 14) === 0) yield;
+    }
+    geo.setAttribute("color", new THREE.BufferAttribute(cols, 3));
+    geo.computeVertexNormals();
+    const tm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: hb === "mountains" });
+    tm.userData.own = true;
+    if (cb === "desert") { tm.normalMap = (MAT._ripple as THREE.MeshBasicMaterial).map; tm.normalScale = new THREE.Vector2(0.6, 0.6); }
+    const terr = new THREE.Mesh(geo, tm);
+    terr.receiveShadow = true;
+    add(terr);
+    const hAt = (pt: THREE.Vector3, lat: number) => { const nr = near.query(pt.x, pt.z); return C[nr.i].y + heightAt(hb, pt.x + O.x, pt.z - O.y, Math.abs(lat)); };
+    if (scen) scen.meshes.forEach(add);
+    yield;
+
+    // Props, placed by route distance so they don't jump when the window is rebuilt.
+    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], trunk: [], crown: [], ghafT: [], ghafC: [], shrub: [], rock: [], tower: [] };
+    const each = (spacing: number, fn: (d: number, r: () => number) => void) => {
+      const k0 = Math.ceil((m0 + A + 30) / spacing), k1 = Math.floor((m0 + B - 30) / spacing);
+      for (let k = k0; k <= k1; k++) fn(k * spacing - m0, rng(k * 7919 + spacing * 31 + 3));
+    };
+    const place = (d: number, lat: number) => { const a = along(d); return { a, pt: a.p.clone().addScaledVector(a.n, lat) }; };
+    if (pb !== "city") each(25, (d) => { for (const sd of [-1, 1]) { const { pt } = place(d, sd * 6.9); it.post.push({ x: pt.x, y: pt.y, z: pt.z }); it.refl.push({ x: pt.x, y: pt.y, z: pt.z }); } });
+    if (pb !== "mountains") each(pb === "city" ? 40 : 55, (d) => {
+      for (const sd of pb === "city" ? [-1, 1] : [-1]) {
+        const { a, pt } = place(d, sd * 7.8), top = 10.5, armLen = 3.2, dir = a.n.clone().multiplyScalar(-sd), ay = Math.atan2(dir.x, dir.z);
+        it.pole.push({ x: pt.x, y: pt.y, z: pt.z, sy: top });
+        it.arm.push({ x: pt.x, y: pt.y + top - 0.2, z: pt.z, ry: ay, sz: armLen });
+        const hp = pt.clone().addScaledVector(dir, armLen);
+        it.lamp.push({ x: hp.x, y: pt.y + top - 0.3, z: hp.z, ry: ay, sz: 0.9 });
+      }
+    });
+    const palm = (pt: THREE.Vector3, s: number, r: () => number) => {
+      const h = 5.5 + r() * 3.5;
+      it.trunk.push({ x: pt.x, y: pt.y, z: pt.z, sx: s, sz: s, sy: h * s, rz: (r() - 0.5) * 0.12 });
+      it.crown.push({ x: pt.x, y: pt.y + h * s - 0.1, z: pt.z, s: s * (0.9 + r() * 0.3), ry: r() * TAU });
+    };
+    if (scen?.palms) { const rp2 = rng(77); scen.palms.forEach((p) => palm(V3(p.x, C[near.query(p.x, p.z).i].y + 0.05, p.z), p.s, rp2)); }
+    if (pb === "city") {
+      each(20, (d, r) => { for (const sd of [-1, 1]) { const lat = sd * (8.4 + (sd < 0 ? 0 : r() * 2.5)), { a, pt } = place(d, lat); if (clear(pt, 6, a.i)) { pt.y = a.p.y + 0.2; palm(pt, 0.95, r); } } });
+      if (!scen || scen.buildings < 40) each(18, (d, r) => {
+        if (r() < 0.5) {
+          const sd = r() > 0.5 ? 1 : -1, lat = sd * (80 + 560 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat);
+          if (clear(pt, 30, a.i)) {
+            const far = Math.abs(lat) / 640, hgt = 16 + r() * (35 + 170 * far), wd = 16 + r() * 24;
+            it.tower.push({ x: pt.x, y: hAt(pt, lat) - 1, z: pt.z, sx: wd, sz: wd * (0.7 + r() * 0.6), sy: hgt, ry: r() * TAU, c: [0xf4efe6, 0xd3dde6, 0xeadbc2, 0xffffff, 0xc4d2dd][(r() * 5) | 0] });
+          }
+        }
+      });
+    } else if (pb === "oasis") {
+      each(6, (d, r) => { if (r() < 0.75) { const sd = r() > 0.5 ? 1 : -1, lat = sd * (9 + 130 * Math.pow(r(), 1.4)), { a, pt } = place(d, lat); if (clear(pt, 7.5, a.i)) { pt.y = hAt(pt, lat); palm(pt, 0.8 + r() * 0.4, r); } } });
+    } else if (pb === "desert") {
+      each(28, (d, r) => {
+        if (r() < 0.5) {
+          const sd = r() > 0.5 ? 1 : -1, lat = sd * (14 + 170 * Math.pow(r(), 1.5)), { a, pt } = place(d, lat);
+          if (clear(pt, 10, a.i)) {
+            const y = hAt(pt, lat), s = 0.8 + r() * 0.6;
+            it.ghafT.push({ x: pt.x, y, z: pt.z, sx: s, sz: s, sy: 1.8 * s, rz: (r() - 0.5) * 0.3 });
+            for (let k = 0; k < 4; k++) it.ghafC.push({ x: pt.x + (r() - 0.5) * 2.6 * s, y: y + (1.9 + r() * 0.7) * s, z: pt.z + (r() - 0.5) * 2.6 * s, sx: (1 + r() * 0.7) * s, sy: 0.55 * s, sz: (1 + r() * 0.7) * s });
+          }
+        }
+      });
+      each(5, (d, r) => { if (r() < 0.5) { const sd = r() > 0.5 ? 1 : -1, lat = sd * (8.5 + 70 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat); if (clear(pt, 8, a.i)) { const s = 0.25 + r() * 0.45; it.shrub.push({ x: pt.x, y: hAt(pt, lat) + s * 0.3, z: pt.z, sx: s, sy: s * 0.6, sz: s, ry: r() * TAU }); } } });
+    } else {
+      // Mountains: rocks half-buried in the slope so they sit on the ground rather than float.
+      each(5, (d, r) => {
+        if (r() < 0.65) {
+          const sd = r() > 0.5 ? 1 : -1, lat = sd * (8.5 + 170 * Math.pow(r(), 1.3)), { a, pt } = place(d, lat);
+          if (clear(pt, 8, a.i)) { const s = 0.4 + r() * (1 + Math.abs(lat) / 30); it.rock.push({ x: pt.x, y: hAt(pt, lat) - s * 0.25, z: pt.z, sx: s * (1 + r() * 0.6), sy: s * (0.6 + r() * 0.5), sz: s, rx: r() * 3, ry: r() * 3 }); }
+        }
+      });
+    }
+    add(inst(GEO.post, MAT.post, it.post)); add(inst(GEO.refl, MAT.refl, it.refl, false));
+    add(inst(GEO.pole, MAT.pole, it.pole)); add(inst(GEO.arm, MAT.pole, it.arm)); add(inst(GEO.lamp, MAT.lamp, it.lamp, false));
+    add(inst(GEO.trunk, MAT.trunk, it.trunk)); add(inst(GEO.crown, MAT.frond, it.crown));
+    add(inst(GEO.ghafT, MAT.ghafT, it.ghafT)); add(inst(GEO.ghafC, MAT.ghafC, it.ghafC)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
+    add(inst(GEO.rock, MAT.rock, it.rock)); add(inst(GEO.tower, MAT.tower, it.tower));
+    yield;
+
+    // Green motorway distance signs every 5 km to the next stop (English + Arabic).
+    const lm = wrapM(route, m0);
+    const { stop, dist: toNext } = nextStop(route, lm);
+    for (let d = toNext % 5000; d < B - 40; d += 5000) {
+      if (d < A + 40) continue;
+      const km = Math.round((toNext - d) / 1000);
+      if (km < 1) continue;
+      const { a, pt } = place(d, 9.4), face = Math.atan2(-a.t.x, -a.t.z), g = new THREE.Group();
+      const mat = new THREE.MeshBasicMaterial({ map: signBoard(stop.name, km), toneMapped: false, fog: true });
+      mat.userData.own = true; mat.userData.ownMap = true;
+      const board = new THREE.Mesh(new THREE.PlaneGeometry(4.6, 2.3), mat); board.position.set(0, 4.2, 0.03); g.add(board);
+      const back = new THREE.Mesh(new THREE.BoxGeometry(4.7, 2.4, 0.08), MAT.sign); back.position.set(0, 4.2, -0.02); back.castShadow = true; g.add(back);
+      for (const dx of [-1.7, 1.7]) { const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 4.2, 8), MAT.pole); leg.position.set(dx, 2.1, -0.08); leg.castShadow = true; g.add(leg); }
+      g.position.copy(pt); g.rotation.y = face; add(g);
+    }
+    const label = BIOME_LABEL[pb] + (scen?.buildings ? ` · ${scen.buildings} buildings from OpenStreetMap` : "");
+    return { group, m0, O, e0, route, osmState: ctx.state, keys, biome: pb, label };
+  }
+
+  private osmArrived(m0: number) {
+    // Rebuild the current window once its map data has arrived (incrementally, no hitch).
+    if (this.win && this.win.m0 === m0 && this.win.osmState !== "complete" && !this.building) this.building = { gen: this.buildWindow(m0), m0 };
+  }
+
+  private scenery(ctx: OsmData, toL: (p: LngLat, y?: number) => THREE.Vector3, near: Nearest, C: THREE.Vector3[], zone: Biome, q: (typeof QUALITY)[Quality]) {
+    const yAt = (x: number, z: number) => C[near.query(x, z).i].y;
+    const toMap = (p: LngLat) => { const v = toL(p); return new THREE.Vector2(v.x, -v.z); };
+    const bbox = (rings: LngLat[][]) => {
+      let a = 1e12, b = -1e12, c = 1e12, d = -1e12;
+      for (const p of rings[0]) { const v = toL(p); a = Math.min(a, v.x); b = Math.max(b, v.x); c = Math.min(c, v.z); d = Math.max(d, v.z); }
+      return { cx: (a + b) / 2, cz: (c + d) / 2, r: Math.hypot(b - a, d - c) / 2 };
+    };
+    const res = { meshes: [] as THREE.Object3D[], buildings: 0, water: false, palms: [] as Array<{ x: number; z: number; s: number }> };
+    // Buildings within 650 m of the road, never on it. Tall ones are kept out to 1.6 km for a skyline.
+    const seen = new Set<string>(), blds: Array<OsmData["b"][number] & { y: number }> = [];
+    for (const b of ctx.b) {
+      const bb = bbox(b.rings), k = Math.round(bb.cx) + "," + Math.round(bb.cz) + "," + Math.round(b.h);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const nr = near.query(bb.cx, bb.cz);
+      const limit = b.h > 60 ? 1600 : 650;
+      if (nr.d > limit || nr.d - bb.r < 12) continue;
+      blds.push({ ...b, y: C[nr.i].y });
+      if (blds.length > q.buildings) break;
+    }
+    res.buildings = blds.length;
+    res.meshes.push(...buildingMeshes(blds, toMap, zone === "city" || blds.length > 120));
+    const pick = <T extends { rings: LngLat[][] }>(arr: T[], R: number) => arr.filter((f) => { const bb = bbox(f.rings); return near.query(bb.cx, bb.cz).d - bb.r < R; });
+    const water = pick(ctx.w.map((rings) => ({ rings })), 1500);
+    res.water = water.length > 0;
+    const W = polyMesh(water.map((f) => ({ rings: f.rings, color: 0x2c88aa })), toMap, yAt, 0.06, -2, { r: 0.12, m: 0.15 });
+    if (W) res.meshes.push(W);
+    const greens = pick(ctx.g, 1200);
+    const G = polyMesh(greens.map((f) => ({ rings: f.rings, color: f.c })), toMap, yAt, 0.065, -2, {});
+    if (G) res.meshes.push(G);
+    const inside = (pt: THREE.Vector2, ring: THREE.Vector2[]) => {
+      let c2 = false;
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const a = ring[i], b2 = ring[j];
+        if (a.y > pt.y !== b2.y > pt.y && pt.x < ((b2.x - a.x) * (pt.y - a.y)) / (b2.y - a.y) + a.x) c2 = !c2;
+      }
+      return c2;
+    };
+    for (const f of greens) {
+      if (res.palms.length > q.palms) break;
+      const bb = bbox(f.rings);
+      if (near.query(bb.cx, bb.cz).d - bb.r > 420) continue;
+      const ring = f.rings[0].map(toMap);
+      let a = 1e12, b2 = -1e12, c3 = 1e12, d2 = -1e12;
+      for (const p of ring) { a = Math.min(a, p.x); b2 = Math.max(b2, p.x); c3 = Math.min(c3, p.y); d2 = Math.max(d2, p.y); }
+      const area = Math.abs(ringArea(ring)), n = Math.min(40, Math.floor(area / 500)), r = rng(Math.floor(hash01(f.rings[0][0][0], f.rings[0][0][1]) * 1e9));
+      for (let k = 0; k < n * 2 && res.palms.length <= q.palms; k++) {
+        const pt = new THREE.Vector2(a + r() * (b2 - a), c3 + r() * (d2 - c3));
+        if (!inside(pt, ring)) continue;
+        const dd = near.query(pt.x, -pt.y).d;
+        if (dd < 10 || dd > 450) continue;
+        res.palms.push({ x: pt.x, z: -pt.y, s: 0.8 + r() * 0.4 });
+      }
+    }
+    const uses = pick(ctx.u, 1200);
+    const U = polyMesh(uses.map((f) => ({ rings: f.rings, color: f.c })), toMap, yAt, 0.05, -1, {});
+    if (U) res.meshes.push(U);
+    // Side roads and junctions — but not the stretch we're riding on (it would show as dark bands beside our road).
+    const roads = ctx.r.filter((r) => {
+      const mid = toL(r.line[(r.line.length / 2) | 0]), dMid = near.query(mid.x, mid.z).d;
+      if (dMid > 700) return false;
+      const a = toL(r.line[0]), b = toL(r.line[r.line.length - 1]);
+      return !(dMid < 14 && near.query(a.x, a.z).d < 14 && near.query(b.x, b.z).d < 14);
+    }).slice(0, 1800);
+    const R = roadMeshes(roads, toL, yAt);
+    if (R) res.meshes.push(R);
+    return res;
+  }
+
+  // ---------- per frame ----------
+  render(f: Frame, dt: number, crank: number) {
+    if (!this.ready) return;
+    const route = this.deps.route();
+    // Build windows ahead of need, a few milliseconds per frame.
+    if (!this.win || this.win.route !== route) {
+      if (this.win) this.dropWin();
+      const gen = this.buildWindow(f.pos);
+      let r = gen.next();
+      while (!r.done) r = gen.next();
+      this.swapIn(r.value);
+      this.building = null;
+    } else if (!this.building && (f.pos > this.win.m0 + 800 || f.pos < this.win.m0 - 300)) {
+      this.building = { gen: this.buildWindow(f.pos), m0: f.pos };
+    }
+    if (this.building) {
+      const t0 = performance.now();
+      let r = this.building.gen.next();
+      while (!r.done && performance.now() - t0 < 7) r = this.building.gen.next();
+      if (r.done) { this.swapIn(r.value); this.building = null; }
+      else if (f.pos > this.win!.m0 + 2400) { while (!r.done) r = this.building.gen.next(); this.swapIn(r.value); this.building = null; }
+    }
+    const w = this.win!;
+    const prof = this.deps.profile();
+    const toL = (m: number) => {
+      const p = pointAt(route, m).p;
+      return V3(p[0] * KX - w.O.x, eleAt(prof, route.total, m) - w.e0, -(p[1] * KY - w.O.y));
+    };
+    const m = f.pos, mps = f.kmh / 3.6;
+    const dir = toL(m + 5).sub(toL(m - 5)); dir.y = 0;
+    if (dir.lengthSq() < 1e-8) dir.set(0, 0, -1);
+    dir.normalize();
+    const yawT = Math.atan2(-dir.x, -dir.z);
+    this.yaw = this.yaw === undefined ? yawT : lerpAngle(this.yaw, yawT, Math.min(1, dt * 3.5));
+    const rn = V3(-dir.z, 0, dir.x), rp = toL(m).addScaledVector(rn, 1.9);
+    rp.y += 0.1;
+    const R = this.rider.g;
+    R.position.copy(rp);
+    R.rotation.set(Math.atan(f.grade) * 0.9, this.yaw, 0, "YXZ");
+    this.rider.update(dt, mps, crank, clamp((f.grade - 0.05) / 0.05, 0, 1) * Math.min(1, f.kmh / 8));
+
+    const fwd = V3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)), right = V3(-fwd.z, 0, fwd.x), portrait = this.cam.aspect < 1.1, sp = Math.min(1.4, mps / 9);
+    const want = rp.clone().addScaledVector(fwd, -(portrait ? 4.4 : 5.2) - sp * 0.6).addScaledVector(right, portrait ? 0.8 : 1.2);
+    want.y = rp.y + (portrait ? 2.3 : 1.95) + Math.sin(this.t * 0.4) * 0.05;
+    const lookW = rp.clone().addScaledVector(fwd, 9);
+    lookW.y = toL(m + 9).y + 1.05;
+    this.t += dt;
+    const offW = want.clone().sub(rp), lookOffW = lookW.clone().sub(rp);
+    if (!this.camOff || !isFinite(this.camOff.x + this.camOff.y + this.camOff.z)) { this.camOff = offW.clone(); this.lookOff = lookOffW.clone(); }
+    this.camOff.lerp(offW, Math.min(1, dt * 3));
+    this.lookOff!.lerp(lookOffW, Math.min(1, dt * 4));
+    const camPos = rp.clone().add(this.camOff), look = rp.clone().add(this.lookOff!);
+    const shake = 0.01 * sp;
+    this.cam.position.copy(camPos).add(V3(Math.sin(this.t * 31) * shake, Math.sin(this.t * 27) * shake, 0));
+    this.cam.lookAt(look);
+
+    // Ghost rides in the next lane and fades out as it nears the camera instead of clipping through it.
+    const G = this.ghost.g;
+    const gNear = f.ghostOn && Math.abs(f.ghostGap) < 320;
+    if (gNear) {
+      const gd = toL(f.ghostPos + 5).sub(toL(f.ghostPos - 5)); gd.y = 0;
+      if (gd.lengthSq() < 1e-8) gd.set(0, 0, -1);
+      gd.normalize();
+      G.position.copy(toL(f.ghostPos).addScaledVector(V3(-gd.z, 0, gd.x), 0.5));
+      G.position.y += 0.1;
+      G.rotation.y = Math.atan2(-gd.x, -gd.z);
+      this.ghost.update(dt, mps || 7, crank * 1.02);
+      this.ghost.setOpacity?.(0.5 * smoothstep(3.5, 9, G.position.distanceTo(this.cam.position)));
+    } else this.ghost.setOpacity?.(0);
+
+    const sky = fwd.clone().applyAxisAngle(UP, 0.55);
+    this.sky.material.uniforms.sunPosition.value.set(sky.x, 0.11, sky.z).normalize();
+    const key = fwd.clone().applyAxisAngle(UP, 1.15), ld = V3(key.x * 0.82, 0.55, key.z * 0.82).normalize();
+    this.sun.position.copy(rp).addScaledVector(ld, 50);
+    this.sun.target.position.copy(rp);
+    this.base.position.set(rp.x, rp.y - 1.5, rp.z);
+    this.renderer.render(this.scene, this.cam);
+  }
+
+  private swapIn(w: Win) {
+    if (this.win) this.dropWin();
+    this.win = w;
+    this.scene.add(w.group);
+    this.info = w.label;
+    // Map data may have arrived while this window was being built.
+    if (w.osmState !== "complete" && w.osmState !== "none" && this.deps.osm.get(w.keys).state === "complete") this.osmArrived(w.m0);
+  }
+
+  private dropWin() {
+    const w = this.win;
+    if (!w) return;
+    this.scene.remove(w.group);
+    const shared = SHARED_GEOS();
+    w.group.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if ((o as THREE.InstancedMesh).isInstancedMesh) { (o as THREE.InstancedMesh).dispose(); return; }
+      if (mesh.geometry && !shared.has(mesh.geometry)) mesh.geometry.dispose();
+      const mat = mesh.material as THREE.Material & { map?: THREE.Texture };
+      if (mat?.userData?.ownMap && mat.map) mat.map.dispose();
+      if (mat?.userData?.own) mat.dispose();
+    });
+    this.win = null;
+  }
+
+  dispose() {
+    this.dropWin();
+    this.renderer?.dispose();
+    this.ready = false;
+  }
+}
+
+// ---------- OSM meshes ----------
+function polyMesh(polys: Array<{ rings: LngLat[][]; color: number }>, toMap: (p: LngLat) => THREE.Vector2, yAt: (x: number, z: number) => number, y: number, offset: number, mo: { r?: number; m?: number }) {
+  const pos: number[] = [], col: number[] = [], c = new THREE.Color();
+  for (const { rings, color } of polys) {
+    const rs = rings.map((r) => { const pts = r.map(toMap); if (pts.length > 1 && pts[0].equals(pts[pts.length - 1])) pts.pop(); return pts; }).filter((r) => r.length >= 3);
+    if (!rs.length) continue;
+    if (ringArea(rs[0]) < 0) rs[0].reverse();
+    for (let k = 1; k < rs.length; k++) if (ringArea(rs[k]) > 0) rs[k].reverse();
+    let faces: number[][];
+    try { faces = THREE.ShapeUtils.triangulateShape(rs[0], rs.slice(1)); } catch { continue; }
+    const all = rs.flat();
+    c.set(color);
+    // Flat polygons sit at the elevation of the road point nearest their middle.
+    let cx = 0, cz = 0;
+    for (const v of rs[0]) { cx += v.x; cz += -v.y; }
+    const py = yAt(cx / rs[0].length, cz / rs[0].length) + y;
+    for (const f of faces) {
+      let [i, j, k] = f;
+      const A = all[i], B = all[j], C2 = all[k];
+      if ((B.x - A.x) * (C2.y - A.y) - (B.y - A.y) * (C2.x - A.x) < 0) [j, k] = [k, j];
+      for (const v of [all[i], all[j], all[k]]) { pos.push(v.x, py, -v.y); col.push(c.r, c.g, c.b); }
+    }
+  }
+  if (!pos.length) return null;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+  g.computeVertexNormals();
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: mo.r ?? 0.95, metalness: mo.m ?? 0, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset });
+  m.userData.own = true;
+  const mesh = new THREE.Mesh(g, m);
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function estHeight(b: { rings: LngLat[][]; h: number; mh: number }, area: number, city: boolean) {
+  if (b.h > 5.5 || b.mh > 0) return b.h;
+  const p = b.rings[0][0], r = hash01(p[0], p[1]), r2 = hash01(p[1], p[0]);
+  if (area < 120) return 5 + 3 * r;
+  if (area < 450) return city ? 8 + 6 * r : 7 + 3 * r;
+  if (area < 1600) return city ? (r2 > 0.35 ? 16 + 26 * r : 9 + 6 * r) : 9 + 6 * r;
+  return city ? (r2 > 0.5 ? 22 + 40 * r : 12 + 8 * r) : 10 + 6 * r;
+}
+
+const FACADES = [0xefe2c8, 0xf1eadb, 0xe9e5dc, 0xe4d6bd, 0xd9dfe4, 0xc2d2de];
+function buildingMeshes(blds: Array<{ rings: LngLat[][]; h: number; mh: number; y: number }>, toMap: (p: LngLat) => THREE.Vector2, city: boolean) {
+  const wp: number[] = [], wu: number[] = [], wc: number[] = [], rp: number[] = [], rc: number[] = [], c = new THREE.Color();
+  for (const b of blds) {
+    const rs = b.rings.map((r) => { const pts = r.map(toMap); if (pts.length > 1 && pts[0].equals(pts[pts.length - 1])) pts.pop(); return pts; }).filter((r) => r.length >= 3);
+    if (!rs.length) continue;
+    if (ringArea(rs[0]) < 0) rs[0].reverse();
+    for (let k = 1; k < rs.length; k++) if (ringArea(rs[k]) > 0) rs[k].reverse();
+    const h = Math.max(4, estHeight(b, Math.abs(ringArea(rs[0])), city)), y0 = b.y + Math.min(Math.max(0, b.mh), h - 2) - 0.5, y1 = b.y + h;
+    const p0 = b.rings[0][0], tone = hash01(p0[1] * 3.1, p0[0] * 1.7);
+    c.set(h > 80 ? 0xc2d2de : h > 30 ? (tone > 0.5 ? 0xe9e5dc : 0xd9dfe4) : FACADES[Math.floor(tone * 4)]);
+    for (const r of rs) {
+      let acc = 0;
+      for (let i = 0; i < r.length; i++) {
+        const a = r[i], q = r[(i + 1) % r.length], len = a.distanceTo(q), u0 = acc / 12, u1 = (acc + len) / 12;
+        acc += len;
+        const v1 = (y1 - y0) / 14;
+        wp.push(a.x, y0, -a.y, q.x, y0, -q.y, q.x, y1, -q.y, a.x, y0, -a.y, q.x, y1, -q.y, a.x, y1, -a.y);
+        wu.push(u0, 0, u1, 0, u1, v1, u0, 0, u1, v1, u0, v1);
+        for (let k = 0; k < 6; k++) wc.push(c.r, c.g, c.b);
+      }
+    }
+    let faces: number[][];
+    try { faces = THREE.ShapeUtils.triangulateShape(rs[0], rs.slice(1)); } catch { faces = []; }
+    const all = rs.flat(), rcol = c.clone().multiplyScalar(0.82);
+    for (const f of faces) {
+      let [i, j, k] = f;
+      const A = all[i], B = all[j], C2 = all[k];
+      if ((B.x - A.x) * (C2.y - A.y) - (B.y - A.y) * (C2.x - A.x) < 0) [j, k] = [k, j];
+      for (const v of [all[i], all[j], all[k]]) { rp.push(v.x, y1, -v.y); rc.push(rcol.r, rcol.g, rcol.b); }
+    }
+  }
+  const out: THREE.Mesh[] = [];
+  if (wp.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(wp, 3));
+    g.setAttribute("uv", new THREE.Float32BufferAttribute(wu, 2));
+    g.setAttribute("color", new THREE.Float32BufferAttribute(wc, 3));
+    g.computeVertexNormals();
+    const m = new THREE.MeshStandardMaterial({ map: facadeTex, vertexColors: true, roughness: 0.62, metalness: 0.05, emissive: new THREE.Color(0x2c2a26), emissiveMap: facadeTex });
+    m.userData.own = true;
+    const mesh = new THREE.Mesh(g, m);
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    out.push(mesh);
+  }
+  if (rp.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(rp, 3));
+    g.setAttribute("color", new THREE.Float32BufferAttribute(rc, 3));
+    g.computeVertexNormals();
+    const rm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 });
+    rm.userData.own = true;
+    const mesh = new THREE.Mesh(g, rm);
+    mesh.receiveShadow = true;
+    out.push(mesh);
+  }
+  return out;
+}
+
+function roadMeshes(roads: OsmData["r"], toL: (p: LngLat, y?: number) => THREE.Vector3, yAt: (x: number, z: number) => number) {
+  const geos: THREE.BufferGeometry[] = [];
+  for (const r of roads) {
+    const C = r.line.map((p) => { const v = toL(p); v.y = yAt(v.x, v.z); return v; });
+    if (C.length < 2) continue;
+    const g = ribbon(C, -r.w / 2, r.w / 2, 0.06, 9);
+    g.deleteAttribute("uv");
+    geos.push(g);
+  }
+  if (!geos.length) return null;
+  let merged: THREE.BufferGeometry | null;
+  try { merged = mergeGeometries(geos); } catch { return null; }
+  geos.forEach((g) => g.dispose());
+  if (!merged) return null;
+  const m = new THREE.MeshStandardMaterial({ color: 0x66656a, roughness: 0.92, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+  m.userData.own = true;
+  const mesh = new THREE.Mesh(merged, m);
+  mesh.receiveShadow = true;
+  return mesh;
+}
