@@ -142,3 +142,43 @@ export function kerbTexture() {
     c.fillStyle = "#25262a"; c.fillRect(0, h / 2, w, h / 2);
   });
 }
+
+/** Soft elliptical contact shadow (white on transparent; tinted by the material colour). */
+export function blobTexture() {
+  return canvasTex(64, 128, (c, w, h) => {
+    c.clearRect(0, 0, w, h);
+    c.save();
+    c.scale(1, h / w);
+    const g = c.createRadialGradient(w / 2, w / 2, 0, w / 2, w / 2, w / 2);
+    g.addColorStop(0, "rgba(255,255,255,1)"); g.addColorStop(0.45, "rgba(255,255,255,.6)"); g.addColorStop(1, "rgba(255,255,255,0)");
+    c.fillStyle = g; c.fillRect(0, 0, w, w);
+    c.restore();
+  }, { repeat: false, srgb: false });
+}
+
+/**
+ * Tileable mottling for the terrain: grey around 0.9 multiplied over the vertex colours, so grass,
+ * sand and rock get patchy light/dark variation and small specks instead of one flat colour.
+ */
+export function groundDetailTexture() {
+  const N = 256;
+  return canvasTex(N, N, (c) => {
+    const img = c.createImageData(N, N), r = rng(17);
+    // Value noise at a few octaves, wrapped so the tile repeats seamlessly.
+    const grid = (g: number) => { const a = new Float32Array(g * g); for (let i = 0; i < a.length; i++) a[i] = r(); return a; };
+    const oct = [[4, 0.45], [8, 0.3], [32, 0.15], [128, 0.1]].map(([g, a]) => ({ g, a, v: grid(g) }));
+    const sm = (t: number) => t * t * (3 - 2 * t);
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      let v = 0;
+      for (const o of oct) {
+        const fx = (x / N) * o.g, fy = (y / N) * o.g, x0 = Math.floor(fx), y0 = Math.floor(fy), tx = sm(fx - x0), ty = sm(fy - y0);
+        const at = (i: number, j: number) => o.v[((j + o.g) % o.g) * o.g + ((i + o.g) % o.g)];
+        const a = at(x0, y0) + (at(x0 + 1, y0) - at(x0, y0)) * tx, b = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * tx;
+        v += (a + (b - a) * ty) * o.a;
+      }
+      const g = Math.round(255 * (0.78 + 0.26 * v)), i = (y * N + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = Math.min(255, g); img.data[i + 3] = 255;
+    }
+    c.putImageData(img, 0, 0);
+  }, { srgb: false });
+}
