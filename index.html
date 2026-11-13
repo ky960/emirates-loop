@@ -733,13 +733,22 @@ function polyMesh(polys, toMap, y, offset, matOpts) {
   const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: matOpts.r ?? .95, metalness: matOpts.m ?? 0, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset });
   const mesh = new THREE.Mesh(g, m); mesh.receiveShadow = true; m.userData.own = true; return mesh;
 }
-function buildingMeshes(blds, toMap) {
+const hash01 = (p) => { const s = Math.sin(p[0] * 12.9898e3 + p[1] * 78.233e3) * 43758.5453; return s - Math.floor(s); };
+function estHeight(b, area, city) {
+  if (b.h > 5.5 || b.mh > 0) return b.h;
+  const r = hash01(b.rings[0][0]), r2 = hash01([b.rings[0][0][1], b.rings[0][0][0]]);
+  if (area < 120) return 5 + 3 * r;
+  if (area < 450) return city ? 8 + 6 * r : 7 + 3 * r;
+  if (area < 1600) return city ? (r2 > .35 ? 16 + 26 * r : 9 + 6 * r) : 9 + 6 * r;
+  return city ? (r2 > .5 ? 22 + 40 * r : 12 + 8 * r) : 10 + 6 * r;
+}
+function buildingMeshes(blds, toMap, city) {
   const wp = [], wu = [], wc = [], rp = [], rc = [], c = new THREE.Color();
   for (const b of blds) {
     let rs = b.rings.map(r => { const pts = r.map(toMap); if (pts.length > 1 && pts[0].equals(pts[pts.length - 1])) pts.pop(); return pts; }).filter(r => r.length >= 3);
     if (!rs.length) continue;
     if (ringArea(rs[0]) < 0) rs[0].reverse(); for (let k = 1; k < rs.length; k++) if (ringArea(rs[k]) > 0) rs[k].reverse();
-    const h = Math.max(4, b.h), y0 = Math.min(Math.max(0, b.mh), h - 2), y1 = h;
+    const h = Math.max(4, estHeight(b, Math.abs(ringArea(rs[0])), city)), y0 = Math.min(Math.max(0, b.mh), h - 2), y1 = h;
     c.set(h > 80 ? 0xC2D2DE : h > 30 ? 0xE9E5DC : h > 12 ? 0xF1EADB : 0xEFE2C8);
     for (const r of rs) { let acc = 0;
       for (let i = 0; i < r.length; i++) { const a = r[i], q = r[(i + 1) % r.length], len = a.distanceTo(q), u0 = acc / 12, u1 = (acc + len) / 12; acc += len;
@@ -769,7 +778,7 @@ function roadMeshes(roads, toL) {
   m.userData.own = true; const mesh = new THREE.Mesh(merged, m); mesh.receiveShadow = true; return mesh;
 }
 // Select and build everything the map knows about near this stretch of road.
-function mapScenery(ctx, toL, Cs, C) {
+function mapScenery(ctx, toL, Cs, C, zone) {
   const toMap = (p) => { const v = toL(p); return new THREE.Vector2(v.x, -v.z); };
   const near = (x, z, R) => { let best = 1e12; for (let k = 0; k < Cs.length; k++) { const dx = Cs[k].x - x, dz = Cs[k].z - z, q = dx * dx + dz * dz; if (q < best) best = q; } return Math.sqrt(best) < R; };
   const minDist = (x, z) => { let best = 1e12; for (let k = 0; k < Cs.length; k++) { const dx = Cs[k].x - x, dz = Cs[k].z - z, q = dx * dx + dz * dz; if (q < best) best = q; } return Math.sqrt(best); };
@@ -779,12 +788,21 @@ function mapScenery(ctx, toL, Cs, C) {
   const seen = new Set(), blds = [];
   for (const b of ctx.b) { const bb = bboxOf(b.rings); const k = Math.round(bb.cx) + "," + Math.round(bb.cz) + "," + Math.round(b.h); if (seen.has(k)) continue; seen.add(k);
     const d = minDist(bb.cx, bb.cz); if (d > 650 || d - bb.r < 10) continue; blds.push(b); if (blds.length > 2600) break; }
-  res.buildings = blds.length; res.meshes.push(...buildingMeshes(blds, toMap));
+  res.buildings = blds.length; res.meshes.push(...buildingMeshes(blds, toMap, zone === "city" || blds.length > 120));
   // water, greens, land use (big polygons: keep anything reaching within 1.5 km)
   const pick = (arr, R) => arr.filter(f => { const bb = bboxOf(f.rings); return minDist(bb.cx, bb.cz) - bb.r < R; });
   const water = pick(ctx.w.map(rings => ({ rings })), 1500); res.water = water.length > 0;
   const W = polyMesh(water.map(f => ({ rings: f.rings, color: 0x2C88AA })), toMap, .06, -2, { r: .12, m: .15 }); if (W) res.meshes.push(W);
   const greens = pick(ctx.g, 1200); const G = polyMesh(greens.map(f => ({ rings: f.rings, color: f.c })), toMap, .065, -2, {}); if (G) res.meshes.push(G);
+  // palms planted inside real parks and green areas near the road
+  res.palms = [];
+  const inside = (pt, ring) => { let c2 = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const a = ring[i], b2 = ring[j]; if (((a.y > pt.y) !== (b2.y > pt.y)) && (pt.x < (b2.x - a.x) * (pt.y - a.y) / (b2.y - a.y) + a.x)) c2 = !c2; } return c2; };
+  for (const f of greens) {
+    if (res.palms.length > 380) break; const bb = bboxOf(f.rings); if (minDist(bb.cx, bb.cz) - bb.r > 420) continue;
+    const ring = f.rings[0].map(toMap); let a = 1e12, b2 = -1e12, c3 = 1e12, d2 = -1e12; for (const p of ring) { a = Math.min(a, p.x); b2 = Math.max(b2, p.x); c3 = Math.min(c3, p.y); d2 = Math.max(d2, p.y); }
+    const area = Math.abs(ringArea(ring)), n = Math.min(40, Math.floor(area / 500)); const r = rng(Math.floor(hash01(f.rings[0][0]) * 1e9));
+    for (let k = 0; k < n * 2 && res.palms.length <= 380; k++) { const pt = new THREE.Vector2(a + r() * (b2 - a), c3 + r() * (d2 - c3)); if (!inside(pt, ring)) continue; const dd = minDist(pt.x, -pt.y); if (dd < 10 || dd > 450) continue; res.palms.push({ x: pt.x, z: -pt.y, s: .8 + r() * .4 }); }
+  }
   const uses = pick(ctx.u, 1200); res.urbanUse = uses.length; const U = polyMesh(uses.map(f => ({ rings: f.rings, color: f.c })), toMap, .05, -1, {}); if (U) res.meshes.push(U);
   // side roads and junctions (drawn under our own road)
   const roads = ctx.r.filter(r => { const p = r.line[(r.line.length / 2) | 0]; const v = toL(p); return near(v.x, v.z, 700); }).slice(0, 1800);
@@ -949,7 +967,7 @@ function buildWindow(m0) {
   const A = -500, B = 2700, STEP = 6, C = [];
   for (let d = A; d <= B; d += STEP) C.push(toL(at(RT, m0 + d).p));
   const zone = biomeAt(at(RT, m0 + 500).p), ctxR = osmContext(m0); ROAD.ctxState = ctxR.state; requestOSM(m0);
-  let scen = null; if (ctxR.data) { try { scen = mapScenery(ctxR.data, toL, C.filter((_, i) => i % 4 === 0), C); } catch (e) { console.error(e); scen = null; } }
+  let scen = null; if (ctxR.data) { try { scen = mapScenery(ctxR.data, toL, C.filter((_, i) => i % 4 === 0), C, zone); } catch (e) { console.error(e); scen = null; } }
   const urban = !!scen && (scen.buildings >= 15 || scen.urbanUse >= 3);
   let hb, cb, pb;
   if (scen) {
@@ -995,6 +1013,7 @@ function buildWindow(m0) {
     }
   });
   const palm = (pt, s, r) => { const h = 5.5 + r() * 3.5; it.trunk.push({ x: pt.x, y: pt.y, z: pt.z, sx: s, sz: s, sy: h * s, rz: (r() - .5) * .12 }); it.crown.push({ x: pt.x, y: pt.y + h * s - .1, z: pt.z, s: s * (.9 + r() * .3), ry: r() * TAU }); };
+  if (scen && scen.palms) { const rp2 = rng(77); scen.palms.forEach(p => palm(V3(p.x, .05, p.z), p.s, rp2)); }
   if (biome === "city") {
     each(20, (d, r) => { for (const sd of [-1, 1]) { const lat = sd * (10 + r() * 2.5), { a, pt } = place(d, lat, r); if (clear(pt, 7, a.i)) { pt.y = hAt(pt, lat); palm(pt, .95, r); } } });
     if (!scen) each(18, (d, r) => { if (r() < .5) { const sd = r() > .5 ? 1 : -1, lat = sd * (80 + 560 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat, r); if (clear(pt, 30, a.i)) { const far = Math.abs(lat) / 640, hgt = 16 + r() * (35 + 170 * far), wd = 16 + r() * 24; it.tower.push({ x: pt.x, y: hAt(pt, lat) - 1, z: pt.z, sx: wd, sz: wd * (.7 + r() * .6), sy: hgt, ry: r() * TAU, c: [0xF4EFE6, 0xD3DDE6, 0xEADBC2, 0xFFFFFF, 0xC4D2DD][(r() * 5) | 0] }); } } });
