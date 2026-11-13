@@ -133,3 +133,184 @@ export function buildRider(override?: THREE.Material, kit: RiderKit = DEFAULT_KI
     : undefined;
   return { g, update, setOpacity };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Detailed rider: rigged cyclist model ("Rigged cyclist" by novusod, CC BY 4.0).
+// Its legs are driven by two-bone IK so the feet follow the crank, like the procedural rider.
+
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion();
+
+/** Turn `bone` (in world space) so the direction `from` points along `to`. */
+function aim(bone: THREE.Object3D, from: THREE.Vector3, to: THREE.Vector3) {
+  _q1.setFromUnitVectors(from.clone().normalize(), to.clone().normalize());
+  bone.getWorldQuaternion(_q2);
+  _q2.premultiply(_q1);
+  bone.parent!.getWorldQuaternion(_q1);
+  bone.quaternion.copy(_q1.invert().multiply(_q2));
+  bone.updateMatrixWorld(true);
+}
+
+/**
+ * Paint a cycling jersey over the bare torso of the body mesh: vertices weighted to the spine,
+ * shoulders and the top of the upper arms get the kit colour.
+ */
+function jerseyMaterial(mesh: THREE.SkinnedMesh, kit: RiderKit) {
+  const g = mesh.geometry, sk = mesh.skeleton, si = g.getAttribute("skinIndex"), sw = g.getAttribute("skinWeight"), pos = g.getAttribute("position");
+  const kind = sk.bones.map((b) => (/Spine|Shoulder/.test(b.name) ? 1 : /Hips/.test(b.name) ? 2 : /(Left|Right)Arm(_\d+)?$/.test(b.name) ? 3 : 0));
+  const joint = sk.boneInverses.map((m) => new THREE.Vector3().setFromMatrixPosition(m.clone().invert()));
+  const mask = new Float32Array(pos.count), get = [si.getX, si.getY, si.getZ, si.getW], getW = [sw.getX, sw.getY, sw.getZ, sw.getW];
+  const p = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    p.fromBufferAttribute(pos, i);
+    let m = 0;
+    for (let c = 0; c < 4; c++) {
+      const b = get[c].call(si, i), w = getW[c].call(sw, i), k = kind[b];
+      if (k === 1 || k === 2) m += w;
+      else if (k === 3 && p.distanceTo(joint[b]) < 0.17) m += w; // short sleeves
+    }
+    mask[i] = m;
+  }
+  g.setAttribute("jersey", new THREE.BufferAttribute(mask, 1));
+  const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
+  const col = new THREE.Color(kit.jersey);
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.jerseyColor = { value: col };
+    sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nattribute float jersey;\nvarying float vJersey;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvJersey = jersey;");
+    sh.fragmentShader = sh.fragmentShader.replace("#include <common>", "#include <common>\nuniform vec3 jerseyColor;\nvarying float vJersey;")
+      .replace("#include <map_fragment>", "#include <map_fragment>\nfloat jm = smoothstep(0.35, 0.6, vJersey);\ndiffuseColor.rgb = mix(diffuseColor.rgb, jerseyColor, jm);")
+      // Fabric is smooth: drop most of the skin's muscle detail from the normal map under the jersey.
+      .replace("#include <normal_fragment_begin>", "#include <normal_fragment_begin>\nvec3 jerseyN = normal;")
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = normalize(mix(normal, jerseyN, jm * 0.85));");
+  };
+  return mat;
+}
+
+export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DEFAULT_KIT): RiderModel | null {
+  const scene = gltf.scene;
+  const bones: Record<string, THREE.Bone> = {};
+  const meshes: THREE.Mesh[] = [];
+  scene.traverse((o) => {
+    if ((o as THREE.Bone).isBone) bones[o.name.replace(/^mixamorig:?/, "").replace(/_\d+$/, "")] = o as THREE.Bone;
+    if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
+  });
+  const need = ["Hips", "Spine", "Head", "LeftUpLeg", "LeftLeg", "LeftFoot", "RightUpLeg", "RightLeg", "RightFoot"];
+  if (need.some((n) => !bones[n])) return null;
+
+  const g = new THREE.Group();
+  const inner = new THREE.Group();
+  inner.rotation.y = Math.PI; // model faces +Z; the scene expects -Z
+  inner.add(scene);
+  scene.position.z = -0.04; // centre between the wheel hubs
+  g.add(inner);
+  g.updateMatrixWorld(true);
+
+  // Body (largest skinned mesh) gets the jersey; hair is hidden under the helmet.
+  const skinned = meshes.filter((m) => (m as THREE.SkinnedMesh).isSkinnedMesh) as THREE.SkinnedMesh[];
+  const size = (m: THREE.Mesh) => m.geometry.getAttribute("position").count;
+  const body = skinned.reduce((a, b) => (size(a) > size(b) ? a : b));
+  body.material = jerseyMaterial(body, kit);
+  const hair = skinned.find((m) => new THREE.Box3().setFromObject(m).min.y > 1.4);
+  if (hair) hair.visible = false;
+  for (const m of meshes) { m.castShadow = true; m.receiveShadow = true; m.frustumCulled = false; }
+
+  // Wheels: re-pivot each tyre about its hub so it can spin.
+  const wheels: THREE.Group[] = [];
+  for (const m of meshes) {
+    if ((m as THREE.SkinnedMesh).isSkinnedMesh) continue;
+    const bb = new THREE.Box3().setFromObject(m), s = bb.getSize(_v1);
+    if (s.y < 0.6 || s.x > 0.3 || s.z > 0.8) continue; // the frame is wider/longer than a wheel
+    const c = scene.worldToLocal(bb.getCenter(new THREE.Vector3()));
+    const pivot = new THREE.Group();
+    pivot.position.copy(c);
+    scene.add(pivot);
+    pivot.updateMatrixWorld(true);
+    pivot.attach(m);
+    wheels.push(pivot);
+  }
+
+  // Crank: pedal axle at the chainring centre; our own arms and pedals turn with the legs.
+  const BB = new THREE.Vector3(0, 0.34, 0.053), CR = 0.16;
+  const crank = new THREE.Group();
+  crank.position.copy(BB);
+  scene.add(crank);
+  const black = new THREE.MeshStandardMaterial({ color: 0x1c1d20, roughness: 0.4, metalness: 0.6 });
+  for (const s of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.03, CR + 0.02), black);
+    arm.position.set(s * 0.085, 0, (-s * CR) / 2); // right arm (x < 0) points forward at angle 0
+    const pedal = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.02, 0.07), black);
+    pedal.position.set(s * 0.13, 0, -s * CR);
+    arm.castShadow = pedal.castShadow = true;
+    crank.add(arm, pedal);
+  }
+
+  // Helmet, following the head bone.
+  const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.1, 24, 12, 0, TAU, 0, Math.PI * 0.6), new THREE.MeshStandardMaterial({ color: 0xf7f6f2, roughness: 0.35 }));
+  helmet.scale.set(0.9, 0.85, 1.16);
+  helmet.castShadow = true;
+  // Placed in model space (Y up, +Z forward) relative to the head bone, then turned with the head.
+  const helmetPivot = new THREE.Group();
+  helmetPivot.add(helmet);
+  helmet.position.set(0, 0.098, -0.008);
+  helmet.rotation.x = -0.14; // front edge up at the brow, back down over the nape
+  scene.add(helmetPivot);
+  const headBind = bones.Head.getWorldQuaternion(new THREE.Quaternion()).premultiply(scene.getWorldQuaternion(new THREE.Quaternion()).invert()).invert();
+
+  // Bind pose, in scene space, to reset from every frame.
+  const legs = (["Right", "Left"] as const).map((side, i) => {
+    const up = bones[side + "UpLeg"], low = bones[side + "Leg"], foot = bones[side + "Foot"];
+    const toe = bones[side + "ToeBase"] ?? foot;
+    const ankle = scene.worldToLocal(foot.getWorldPosition(new THREE.Vector3())), ball = scene.worldToLocal(toe.getWorldPosition(new THREE.Vector3()));
+    return {
+      up, low, foot, phase: i * Math.PI, x: ball.x,
+      q: [up.quaternion.clone(), low.quaternion.clone(), foot.quaternion.clone()],
+      // Ankle position relative to the ball of the foot (which sits on the pedal).
+      off: ankle.sub(ball),
+      footW: foot.getWorldQuaternion(new THREE.Quaternion()).premultiply(scene.getWorldQuaternion(new THREE.Quaternion()).invert()),
+    };
+  });
+  const spine = bones.Spine, spineQ = spine.quaternion.clone();
+  const sceneQ = new THREE.Quaternion(), fwd = new THREE.Vector3(), tgt = new THREE.Vector3(), H = new THREE.Vector3(), K = new THREE.Vector3(), A = new THREE.Vector3();
+
+  function update(dt: number, mps: number, ck: number) {
+    wheels.forEach((w) => (w.rotation.x += (mps / 0.35) * dt));
+    crank.rotation.x = ck;
+    const eff = Math.min(1, mps / 5);
+    spine.quaternion.copy(spineQ).multiply(_q1.setFromAxisAngle(_v1.set(0, 0, 1), Math.sin(ck) * 0.035 * eff));
+    g.rotation.z = Math.sin(ck) * 0.01 * Math.min(1, mps / 2);
+    g.updateMatrixWorld(true);
+    scene.getWorldQuaternion(sceneQ);
+    fwd.set(0, 0, 1).applyQuaternion(sceneQ);
+    for (const l of legs) {
+      l.up.quaternion.copy(l.q[0]); l.low.quaternion.copy(l.q[1]); l.foot.quaternion.copy(l.q[2]);
+      l.up.updateMatrixWorld(true);
+      const th = ck + l.phase;
+      // Pedal (ball of foot) on the crank circle, ankle a little behind and above it; heel drops slightly on the downstroke.
+      const ankling = -0.25 * Math.sin(th) + 0.1;
+      const off = _v3.copy(l.off).applyAxisAngle(_v1.set(1, 0, 0), ankling);
+      tgt.set(l.x, BB.y - CR * Math.sin(th), BB.z + CR * Math.cos(th)).add(off);
+      scene.localToWorld(tgt);
+      l.up.getWorldPosition(H); l.low.getWorldPosition(K); l.foot.getWorldPosition(A);
+      const L1 = H.distanceTo(K), L2 = K.distanceTo(A);
+      const dir = _v2.subVectors(tgt, H), d = clamp(dir.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
+      dir.normalize();
+      const a = Math.acos(clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
+      const pole = fwd.clone().addScaledVector(dir, -fwd.dot(dir)).normalize(); // knees bend forward
+      const knee = H.clone().addScaledVector(dir, L1 * Math.cos(a)).addScaledVector(pole, L1 * Math.sin(a));
+      aim(l.up, K.clone().sub(H), knee.clone().sub(H));
+      l.low.getWorldPosition(K); l.foot.getWorldPosition(A);
+      aim(l.low, A.clone().sub(K), tgt.clone().sub(K));
+      // Keep the foot at its modelled angle (plus ankling) instead of following the shin.
+      const want = _q2.copy(sceneQ).multiply(l.footW).premultiply(_q1.setFromAxisAngle(_v1.set(1, 0, 0).applyQuaternion(sceneQ), ankling));
+      l.foot.parent!.getWorldQuaternion(_q1);
+      l.foot.quaternion.copy(_q1.invert().multiply(want));
+    }
+    // Helmet follows the head: same offset, turned by however far the head has rotated from its rest pose.
+    const head = bones.Head;
+    head.updateMatrixWorld(true);
+    head.getWorldPosition(helmetPivot.position); scene.worldToLocal(helmetPivot.position);
+    head.getWorldQuaternion(helmetPivot.quaternion).premultiply(_q1.copy(sceneQ).invert()).multiply(headBind);
+  }
+  return { g, update };
+}

@@ -8,7 +8,7 @@ Built for one rider on a Samsung Galaxy Tab S7+ in Chrome, with a CYCPLUS speed/
 
 - **Sensors:** any number of Bluetooth sensors at once. Speed (CSC wheel), cadence (CSC crank), heart rate, and smart trainers (FTMS). A CYCPLUS unit in speed mode (blue light) or cadence mode (green light) is detected automatically. Sensors reconnect on their own after a dropout.
 - **Real gradients:** elevation comes from the open terrain model (or the GPX file). With "Climbs slow you down" on, your sensor speed counts as flat-road effort and the route's gradient changes your virtual speed.
-- **3D road view:** the road follows the real elevation. Real buildings, parks and water come from OpenStreetMap. Desert, city, oasis and Hajar mountain scenery, green distance signs in English and Arabic, and a rider whose legs follow your cadence (estimated from speed when only a speed sensor is connected).
+- **3D road view:** the road follows the real elevation. Detailed 3D models for the rider, date palms and traffic (Camry, Patrol). Real buildings, parks and water come from OpenStreetMap. Desert, city, oasis and Hajar mountain scenery, green distance signs in English and Arabic, and a rider whose legs follow your cadence (estimated from speed when only a speed sensor is connected).
 - **Ghost:** replays your best ride second by second.
 - **Trustworthy data:**
   - Ride time comes from the clock, not the screen's frame rate, and distance from the sensor.
@@ -49,3 +49,8 @@ Both share the same origin, so the new app imports the old app's settings and ri
 
 - `app/public/env/quarry_01_1k.hdr`: "Quarry 01" HDRI by Poly Haven (CC0), via the three.js examples.
 - `app/public/tex/*`: procedurally generated for this app (CC0).
+- `app/public/models/*`: 3D models from Sketchfab under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Each was compressed (meshopt geometry, WebP textures, some mesh simplification). The cyclist also gets a painted-on jersey, a helmet and pedalling legs in code, and the Camry's interior was dropped.
+  - `cyclist.glb`: ["Rigged cyclist"](https://sketchfab.com/3d-models/rigged-cyclist-ff9f413898844f1d8ee7318f048b3619) by novusod
+  - `date_palm.glb`: ["Date Palm"](https://sketchfab.com/3d-models/date-palm-11acf710e6c149daa8d6fb8cdc5d087f) by evolveduk
+  - `camry.glb`: ["Toyota Camry 40"](https://sketchfab.com/3d-models/toyota-camry-40-560c174d073f4a10bb153ded41ada8c9) by Ford mondeo
+  - `patrol.glb`: ["Nissan Patrol Nismo"](https://sketchfab.com/3d-models/nissan-patrol-nismo-80162fe6fadd4650a2a6c38fca3662a0) by radekstepan
