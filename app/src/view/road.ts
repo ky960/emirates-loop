@@ -12,7 +12,9 @@ import { clamp, D2R, hash01, rng, smoothstep, TAU } from "../util";
 import type { OsmData, OsmTiles } from "./osm";
 import { carGeometry, ghafGeometry, JERSEY, palmCrownGeometry, palmTrunkGeometry, sweep, WBEAM } from "./props";
 import { loadModels, type Models, type Part } from "./models";
+import { Pedestrians } from "./people";
 import { buildModelRider, buildRider, type RiderModel } from "./rider";
+import { uaeFlagTexture } from "./textures";
 import { barkTexture, blobTexture, facadeTextures, frondTexture, groundDetailTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
 
 type Biome = "desert" | "city" | "mountains" | "oasis" | "flat";
@@ -22,10 +24,11 @@ const KX = Math.cos(24.8 * D2R) * 111320, KY = 110574;
 const BIOME_LABEL: Record<Biome, string> = { desert: "Desert highway", city: "City", mountains: "Hajar mountains", oasis: "Al Ain oasis", flat: "Coast" };
 
 // palmNear: palms within this many metres ahead use the detailed model; farther ones the light procedural palm.
-const QUALITY: Record<Quality, { grid: number; shadow: number; shadowR: number; dpr: number; buildings: number; palms: number; palmNear: number; cars: number; skyline: number }> = {
-  battery: { grid: 100, shadow: 0, shadowR: 0, dpr: 1, buildings: 700, palms: 160, palmNear: 90, cars: 8, skyline: 0 },
-  balanced: { grid: 150, shadow: 2048, shadowR: 30, dpr: 1.25, buildings: 1800, palms: 300, palmNear: 220, cars: 18, skyline: 500 },
-  max: { grid: 180, shadow: 4096, shadowR: 42, dpr: 1.6, buildings: 2600, palms: 380, palmNear: 380, cars: 26, skyline: 900 },
+// people: pedestrians on the city sidewalks.
+const QUALITY: Record<Quality, { grid: number; shadow: number; shadowR: number; dpr: number; buildings: number; palms: number; palmNear: number; cars: number; skyline: number; people: number }> = {
+  battery: { grid: 100, shadow: 0, shadowR: 0, dpr: 1, buildings: 700, palms: 160, palmNear: 90, cars: 8, skyline: 0, people: 6 },
+  balanced: { grid: 150, shadow: 2048, shadowR: 30, dpr: 1.25, buildings: 1800, palms: 300, palmNear: 220, cars: 18, skyline: 500, people: 14 },
+  max: { grid: 180, shadow: 4096, shadowR: 42, dpr: 1.6, buildings: 2600, palms: 380, palmNear: 380, cars: 26, skyline: 900, people: 22 },
 };
 /** Horizon haze: fog and the far ground fade into the sky colour so there is no hard edge. */
 const HAZE = 0xdcd2c2;
@@ -322,9 +325,37 @@ function makeShared() {
     ...facadeMaterials(),
     sign: std(0x8e8e8a, { r: 0.5, m: 0.5 }),
     canopy: std(0xece6d8, { r: 0.9, x: { side: THREE.DoubleSide } }),
+    flower: std(0xffffff, { r: 0.95 }),
+    glass: new THREE.MeshStandardMaterial({ color: 0xbcd6de, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }),
+    shelter: std(0xd9dcde, { r: 0.4, m: 0.6 }),
+    flag: (() => {
+      // Waves in the breeze: ripples travel out from the hoist, growing toward the fly end.
+      const m = new THREE.MeshStandardMaterial({ map: uaeFlagTexture(), side: THREE.DoubleSide, roughness: 0.8 });
+      m.onBeforeCompile = (sh) => {
+        sh.uniforms.flagTime = FLAG_TIME;
+        sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nuniform float flagTime;")
+          .replace("#include <begin_vertex>", "#include <begin_vertex>\nfloat fu = position.x / 1.6;\ntransformed.z += sin(position.x * 3.2 - flagTime * 5.0 + position.y * 1.3) * 0.11 * fu;\ntransformed.y -= 0.06 * fu * fu;");
+      };
+      return m;
+    })(),
   });
   GEO.post = new THREE.BoxGeometry(0.1, 0.95, 0.1).translate(0, 0.475, 0);
   GEO.bay = new THREE.BoxGeometry(0.12, 0.01, 5.4); // parking bay line, lengthwise across the road direction
+  GEO.zebra = new THREE.BoxGeometry(0.5, 0.01, 3.2); // crossing stripe, lengthwise along the road
+  GEO.flower = new THREE.IcosahedronGeometry(1, 1);
+  GEO.flag = new THREE.PlaneGeometry(1.6, 0.8, 16, 4).translate(0.8, 0, 0); // hoist edge at x = 0
+  // Bus shelter (local x along the road, +z toward the back): roof, glass back and ends, posts, bench.
+  GEO.shelterRoof = new THREE.BoxGeometry(4, 0.14, 1.7).translate(0, 2.55, 0.05);
+  GEO.shelterGlass = mergeGeometries([
+    new THREE.BoxGeometry(3.8, 2.1, 0.03).translate(0, 1.35, 0.7),
+    new THREE.BoxGeometry(0.03, 2.1, 1.2).translate(-1.9, 1.35, 0.15),
+    new THREE.BoxGeometry(0.03, 2.1, 1.2).translate(1.9, 1.35, 0.15),
+  ])!;
+  GEO.shelterFrame = mergeGeometries([
+    ...[-1.95, 1.95].flatMap((x) => [new THREE.BoxGeometry(0.08, 2.5, 0.08).translate(x, 1.25, 0.72), new THREE.BoxGeometry(0.08, 2.5, 0.08).translate(x, 1.25, -0.6)]),
+    new THREE.BoxGeometry(2.4, 0.06, 0.42).translate(0, 0.46, 0.42),
+    ...[-1, 1].map((x) => new THREE.BoxGeometry(0.06, 0.46, 0.38).translate(x, 0.23, 0.42)),
+  ])!;
   GEO.refl = new THREE.BoxGeometry(0.105, 0.14, 0.105).translate(0, 0.82, 0);
   GEO.pole = new THREE.CylinderGeometry(0.08, 0.13, 1, 8).translate(0, 0.5, 0);
   GEO.arm = new THREE.BoxGeometry(0.08, 0.08, 1).translate(0, 0, 0.5);
@@ -348,6 +379,8 @@ const SHARED_GEOS = () => {
   MODELS?.palm?.forEach((p) => s.add(p.geo));
   return s;
 };
+/** Time (s) for waving flags. */
+const FLAG_TIME = { value: 0 };
 let groundDetail: THREE.Texture | null = null;
 /** Shared terrain detail map, tiled every ~70 m over the 4.4 km terrain patch. */
 const GROUND_DETAIL = () => {
@@ -415,7 +448,8 @@ function signBoard(name: string, km: number) {
 
 // ---------- traffic ----------
 interface Car { m: number; lane: 0 | 1 | 2; v: number; kind: 0 | 1; idx: number }
-const PAINT = [0xf4f4f2, 0xf4f4f2, 0xeeeeec, 0xb9bdc1, 0x8e9399, 0x2b2e33, 0x17191c, 0x1f3a5c, 0x8a1c1c, 0xcbb592, 0x3d4a3a];
+// Mostly white, silver and black, as on UAE roads, plus cream (Dubai taxis).
+const PAINT = [0xf4f4f2, 0xf4f4f2, 0xeeeeec, 0xb9bdc1, 0x8e9399, 0x2b2e33, 0x17191c, 0x1f3a5c, 0x8a1c1c, 0xcbb592, 0x3d4a3a, 0xe8d9b5, 0xe8d9b5];
 
 /** Cars on both carriageways: some overtake you in the next lane, the rest come the other way. */
 class Traffic {
@@ -531,6 +565,7 @@ export class RoadView {
   private t = 0;
   private quality: Quality;
   private traffic: Traffic | null = null;
+  private people: Pedestrians | null = null;
   /** Where the current (or next) ride starts; the parking lot is built there. */
   private lotS = 0;
   /** Soft contact shadow under the bike: grounds the rider at every quality level, even without shadow maps. */
@@ -787,7 +822,7 @@ export class RoadView {
     yield;
 
     // Props, placed by route distance so they don't jump when the window is rebuilt.
-    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
+    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], flag: [], flower: [], zebra: [], shelter: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
     // Scenery off the road must clear the opposite carriageway on the left.
     const off = (sd: number, base: number) => (sd > 0 ? base : -(base + (city ? 14 : 9)));
     const each = (spacing: number, fn: (d: number, r: () => number) => void) => {
@@ -832,6 +867,39 @@ export class RoadView {
       // Palms between the median lamps and along both sidewalks.
       each(36, (d, r) => { const { a, pt } = place(d + 18, -7.25); pt.y = a.p.y + 0.22; palm(pt, 0.95 + r() * 0.15, r); });
       each(14, (d, r) => { for (const lat of [6.6, -20.6]) { const { a, pt } = place(d + (lat > 0 ? 0 : 7), lat); pt.y = a.p.y + 0.22; palm(pt, 0.85 + r() * 0.2, r); } });
+      // Waving UAE flags on the median lamp posts, facing the traffic.
+      each(36, (d) => {
+        const { a, pt } = place(d, -7.25 + 0.14);
+        if (inLot(pt.x, pt.z, 2)) return;
+        it.flag.push({ x: pt.x, y: a.p.y + 7.6, z: pt.z, ry: Math.atan2(-a.n.z, a.n.x) });
+      });
+      // Bougainvillea and clipped shrubs in the median, kept clear of the lamp posts and palms.
+      // Low clumps of a few overlapping mounds: green shrub with bougainvillea flowering on top.
+      each(2.5, (d, r) => {
+        const k = ((d + m0) % 18 + 18) % 18;
+        if (k < 1.6 || k > 16.4 || r() < 0.2) return;
+        const lat = -4.8 - r() * 5, bloom = r() < 0.6, hue = [0xd8287a, 0xe0479a, 0xc2246a, 0xf06aa8, 0xe8505a][Math.floor(r() * 5)];
+        for (let j = 0; j < 3; j++) {
+          const { a, pt } = place(d + (r() - 0.5) * 1.4, lat + (r() - 0.5) * 1.2), s2 = 0.22 + r() * 0.22;
+          const c = bloom && (j > 0 || r() < 0.5) ? hue : [0x4f7a2e, 0x3f6a26, 0x5f8a36][Math.floor(r() * 3)];
+          it.flower.push({ x: pt.x, y: a.p.y + 0.22 + s2 * 0.3, z: pt.z, sx: s2 * 1.3, sy: s2 * 0.75, sz: s2 * 1.3, ry: r() * TAU, c });
+        }
+      });
+      // Zebra crossings over both carriageways.
+      each(320, (d) => {
+        const { a } = place(d + 160, 0), ry = Math.atan2(a.t.x, a.t.z);
+        if (inLot(a.p.x + a.n.x * 2, a.p.z + a.n.z * 2, 30)) return;
+        for (const [l0, l1] of [[-3.5, 3.5], [-18, -11]]) for (let lat = l0; lat <= l1; lat += 1) {
+          const pt = a.p.clone().addScaledVector(a.n, lat);
+          it.zebra.push({ x: pt.x, y: a.p.y + 0.106, z: pt.z, ry });
+        }
+      });
+      // Bus shelters on the sidewalk, midway between two sidewalk palms.
+      each(420, (d) => {
+        const { a, pt } = place(d + 7, 7.7);
+        if (inLot(pt.x, pt.z, 4)) return;
+        it.shelter.push({ x: pt.x, y: a.p.y + 0.22, z: pt.z, ry: Math.atan2(a.n.x, a.n.z) });
+      });
       const fill: Bld[] = [];
       if (!scen || scen.buildings < 40) each(18, (d, r) => {
         if (r() < 0.5) {
@@ -967,6 +1035,8 @@ export class RoadView {
     const palmLod = palms.length ? new PalmLod(palms, MODELS?.palm ? q.palmNear : 0, group) : null;
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
     add(inst(GEO.rock, MAT.rock, it.rock));
+    add(inst(GEO.flag, MAT.flag, it.flag)); add(inst(GEO.flower, MAT.flower, it.flower, false)); add(inst(GEO.zebra, MAT.white, it.zebra, false));
+    add(inst(GEO.shelterRoof, MAT.shelter, it.shelter)); add(inst(GEO.shelterFrame, MAT.shelter, it.shelter)); add(inst(GEO.shelterGlass, MAT.glass, it.shelter, false));
     yield;
 
     // Green motorway distance signs every 5 km to the next stop (English + Arabic).
@@ -1012,6 +1082,10 @@ export class RoadView {
       mr.g.add(this.blob);
       this.scene.add(mr.g);
       this.rider = mr;
+    }
+    if (MODELS?.walkers.length && !this.people) {
+      this.people = new Pedestrians(MODELS.walkers, QUALITY[this.quality].people);
+      this.scene.add(this.people.group);
     }
     if (this.traffic) {
       this.scene.remove(this.traffic.group);
@@ -1209,6 +1283,8 @@ export class RoadView {
     this.sun.target.position.copy(ahead);
     this.base.position.set(rp.x, rp.y - 1.5, rp.z);
     w.palms?.update(dt, rp, fwd);
+    FLAG_TIME.value += dt;
+    this.people?.update(dt, f.pos, { onPath, city: w.biome === "city", sidewalkY: 0.22 });
     if (this.traffic) this.traffic.update(dt, f.pos, { onPath, city: w.biome === "city", lo: w.m0 - 480, hi: w.m0 + 2680 });
     this.renderer.render(this.scene, this.cam);
   }

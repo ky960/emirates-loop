@@ -182,3 +182,13 @@ export function groundDetailTexture() {
     c.putImageData(img, 0, 0);
   }, { srgb: false });
 }
+
+/** UAE flag: red band at the hoist, then green, white and black stripes. */
+export function uaeFlagTexture() {
+  return canvasTex(128, 64, (c, w, h) => {
+    c.fillStyle = "#00732f"; c.fillRect(0, 0, w, h / 3);
+    c.fillStyle = "#ffffff"; c.fillRect(0, h / 3, w, h / 3);
+    c.fillStyle = "#000000"; c.fillRect(0, (2 * h) / 3, w, h / 3 + 1);
+    c.fillStyle = "#ff0000"; c.fillRect(0, 0, w / 4, h);
+  }, { repeat: false });
+}
