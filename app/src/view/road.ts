@@ -12,7 +12,7 @@ import { clamp, D2R, hash01, rng, smoothstep, TAU } from "../util";
 import type { OsmData, OsmTiles } from "./osm";
 import { carGeometry, ghafGeometry, JERSEY, palmCrownGeometry, palmTrunkGeometry, sweep, WBEAM } from "./props";
 import { buildRider, type RiderModel } from "./rider";
-import { barkTexture, facadeTextures, frondTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
+import { barkTexture, blobTexture, facadeTextures, frondTexture, groundDetailTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
 
 type Biome = "desert" | "city" | "mountains" | "oasis" | "flat";
 const V3 = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
@@ -20,11 +20,13 @@ const UP = V3(0, 1, 0);
 const KX = Math.cos(24.8 * D2R) * 111320, KY = 110574;
 const BIOME_LABEL: Record<Biome, string> = { desert: "Desert highway", city: "City", mountains: "Hajar mountains", oasis: "Al Ain oasis", flat: "Coast" };
 
-const QUALITY: Record<Quality, { grid: number; shadow: number; dpr: number; buildings: number; palms: number; cars: number; skyline: number }> = {
-  battery: { grid: 100, shadow: 0, dpr: 1, buildings: 700, palms: 160, cars: 8, skyline: 0 },
-  balanced: { grid: 150, shadow: 1024, dpr: 1.25, buildings: 1800, palms: 300, cars: 18, skyline: 500 },
-  max: { grid: 180, shadow: 2048, dpr: 1.6, buildings: 2600, palms: 380, cars: 26, skyline: 900 },
+const QUALITY: Record<Quality, { grid: number; shadow: number; shadowR: number; dpr: number; buildings: number; palms: number; cars: number; skyline: number }> = {
+  battery: { grid: 100, shadow: 0, shadowR: 0, dpr: 1, buildings: 700, palms: 160, cars: 8, skyline: 0 },
+  balanced: { grid: 150, shadow: 2048, shadowR: 30, dpr: 1.25, buildings: 1800, palms: 300, cars: 18, skyline: 500 },
+  max: { grid: 180, shadow: 4096, shadowR: 42, dpr: 1.6, buildings: 2600, palms: 380, cars: 26, skyline: 900 },
 };
+/** Horizon haze: fog and the far ground fade into the sky colour so there is no hard edge. */
+const HAZE = 0xdcd2c2;
 
 const lerpAngle = (a: number, b: number, t: number) => a + (((((b - a) % TAU) + TAU * 1.5) % TAU) - Math.PI) * t;
 
@@ -103,6 +105,7 @@ function ribbon(C: THREE.Vector3[], o0: number, o1: number, y: number, vLen: num
 }
 
 interface Item { x: number; y: number; z: number; s?: number; sx?: number; sy?: number; sz?: number; rx?: number; ry?: number; rz?: number; c?: number }
+const _lm = new THREE.Matrix4(), _li = new THREE.Matrix4(), _o = new THREE.Vector3();
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3(), _e = new THREE.Euler();
 function inst(geo: THREE.BufferGeometry, mat: THREE.Material, items: Item[], shadow = true) {
   if (!items.length) return null;
@@ -199,11 +202,6 @@ function makeShared() {
     const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(160, 160); return t;
   })();
   MAT._ripple = new THREE.MeshBasicMaterial({ map: ripple }); // holder so the texture is shared
-  const win = rTex(64, 256, (c, w, h) => {
-    c.fillStyle = "#E6E9EC"; c.fillRect(0, 0, w, h);
-    const r = rng(42);
-    for (let y = 4; y < h; y += 10) for (let x = 3; x < w; x += 8) { c.fillStyle = r() > 0.2 ? "rgba(70,105,135,.55)" : "rgba(255,226,170,.75)"; c.fillRect(x, y, 5, 6); }
-  });
   const std = (color: number, o: { r?: number; m?: number; x?: THREE.MeshStandardMaterialParameters } = {}) =>
     new THREE.MeshStandardMaterial({ color, roughness: o.r ?? 0.8, metalness: o.m ?? 0, ...o.x });
   // Road layers are separated by real height; offsets only break ties and stay tiny so the road can never be drawn over the rider.
@@ -234,7 +232,6 @@ function makeShared() {
     shrub: std(0x9a9257, { r: 1, x: { flatShading: true } }),
     rock: std(0x8a6a55, { r: 0.95, x: { flatShading: true } }),
     ...facadeMaterials(),
-    tower: new THREE.MeshStandardMaterial({ map: win, roughness: 0.5, metalness: 0.1, emissive: new THREE.Color(0x4a4640), emissiveMap: win }),
     sign: std(0x8e8e8a, { r: 0.5, m: 0.5 }),
   });
   GEO.post = new THREE.BoxGeometry(0.1, 0.95, 0.1).translate(0, 0.475, 0);
@@ -253,9 +250,14 @@ function makeShared() {
   GEO.ghafC = new THREE.IcosahedronGeometry(1, 1);
   GEO.shrub = new THREE.IcosahedronGeometry(1, 0);
   GEO.rock = new THREE.DodecahedronGeometry(1, 0);
-  GEO.tower = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 }
 const SHARED_GEOS = () => new Set(Object.values(GEO));
+let groundDetail: THREE.Texture | null = null;
+/** Shared terrain detail map, tiled every ~70 m over the 4.4 km terrain patch. */
+const GROUND_DETAIL = () => {
+  if (!groundDetail) { groundDetail = groundDetailTexture(); groundDetail.repeat.set(4400 / 70, 4400 / 70); }
+  return groundDetail;
+};
 
 /** Tileable PBR sets (albedo, normal, roughness) shipped with the app in /tex. */
 const PBR: Record<string, { map?: THREE.Texture; normalMap?: THREE.Texture; roughnessMap?: THREE.Texture }> = {};
@@ -426,7 +428,7 @@ export class RoadView {
       r.shadowMap.enabled = q.shadow > 0;
       r.shadowMap.type = THREE.PCFSoftShadowMap;
       r.toneMapping = THREE.ACESFilmicToneMapping;
-      r.toneMappingExposure = 0.7;
+      r.toneMappingExposure = 0.78;
       r.outputColorSpace = THREE.SRGBColorSpace;
       this.renderer = r;
     } catch {
@@ -442,7 +444,7 @@ export class RoadView {
     u.turbidity.value = 4.5; u.rayleigh.value = 2.4; u.mieCoefficient.value = 0.004; u.mieDirectionalG.value = 0.88;
     s.add(sky);
     this.sky = sky;
-    s.fog = new THREE.FogExp2(0xe6d3b8, 0.0003);
+    s.fog = new THREE.FogExp2(HAZE, 0.00042);
     // Image-based lighting from a real sunny-sky HDRI (Poly Haven "Quarry 01", CC0) for natural ambient light and reflections.
     const pm = new THREE.PMREMGenerator(this.renderer);
     new RGBELoader().load(import.meta.env.BASE_URL + "env/quarry_01_1k.hdr", (hdr) => {
@@ -450,28 +452,35 @@ export class RoadView {
       s.environment = pm.fromEquirectangular(hdr).texture;
       hdr.dispose();
       pm.dispose();
-      this.hemi.intensity = 0.15;
+      this.hemi.intensity = 0.1;
     }, undefined, () => pm.dispose());
     loadPbr(() => applyPbr());
     this.hemi = new THREE.HemisphereLight(0xfff0dc, 0x9a7a58, 0.55);
     s.add(this.hemi);
-    const sun = new THREE.DirectionalLight(0xffdfb8, 2.5);
+    const sun = new THREE.DirectionalLight(0xffd9ac, 3.1);
     const q = QUALITY[this.quality];
     if (q.shadow) {
+      // Shadow box covers the road ahead (palms, lamps, cars, gantries), not just the rider.
       sun.castShadow = true;
       sun.shadow.mapSize.set(q.shadow, q.shadow);
-      Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10, near: 1, far: 140 });
-      sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03; sun.shadow.radius = 3;
+      const R = q.shadowR;
+      Object.assign(sun.shadow.camera, { left: -R, right: R, top: R, bottom: -R, near: 1, far: 260 });
+      sun.shadow.bias = -0.0003; sun.shadow.normalBias = 0.04; sun.shadow.radius = 2.5;
     }
     s.add(sun, sun.target);
     this.sun = sun;
-    const base = new THREE.Mesh(new THREE.CircleGeometry(14000, 64), new THREE.MeshStandardMaterial({ color: 0xddb98a, roughness: 1 }));
+    const base = new THREE.Mesh(new THREE.CircleGeometry(14000, 64), new THREE.MeshStandardMaterial({ color: 0xd9bf98, roughness: 1 }));
     base.rotation.x = -Math.PI / 2;
     s.add(base);
     this.base = base;
     this.cam = new THREE.PerspectiveCamera(52, 1, 0.3, 30000);
     this.rider = buildRider();
     this.rider.g.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
+    // Soft contact shadow under the bike: grounds the rider at every quality level, even without shadow maps.
+    const blob = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 2.1).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false, opacity: 0.55, color: 0x000000, polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8 }));
+    blob.position.y = 0.012;
+    blob.renderOrder = 1;
+    this.rider.g.add(blob);
     s.add(this.rider.g);
     this.ghost = buildRider(new THREE.MeshBasicMaterial({ color: 0x18d6c8, transparent: true, opacity: 0.5, depthWrite: false }));
     s.add(this.ghost.g);
@@ -576,7 +585,8 @@ export class RoadView {
     }
     geo.setAttribute("color", new THREE.BufferAttribute(cols, 3));
     geo.computeVertexNormals();
-    const tm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: hb === "mountains" });
+    // Detail map mottles the vertex colours (tile ~70 m; its finest octave gives sub-metre specks).
+    const tm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: hb === "mountains", map: GROUND_DETAIL() });
     tm.userData.own = true;
     tm.envMapIntensity = 0.35;
     tm.polygonOffset = true; tm.polygonOffsetFactor = 1; tm.polygonOffsetUnits = 2;
@@ -586,7 +596,7 @@ export class RoadView {
         // Sand normal/roughness tiled every ~6 m across the 4.4 km terrain patch.
         const nm = sand.normalMap.clone(); nm.repeat.set(SZ / 6, SZ / 6); nm.needsUpdate = true;
         tm.normalMap = nm; tm.normalScale = new THREE.Vector2(cb === "desert" ? 0.9 : 0.5, cb === "desert" ? 0.9 : 0.5);
-        tm.userData.ownMap = true;
+        tm.userData.ownNormal = true;
       } else { tm.normalMap = (MAT._ripple as THREE.MeshBasicMaterial).map; tm.normalScale = new THREE.Vector2(0.6, 0.6); }
     }
     const terr = new THREE.Mesh(geo, tm);
@@ -612,7 +622,7 @@ export class RoadView {
     yield;
 
     // Props, placed by route distance so they don't jump when the window is rebuilt.
-    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], trunk: [], crown: [], ghafW: [], ghafCan: [], shrub: [], rock: [], tower: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
+    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], trunk: [], crown: [], ghafW: [], ghafCan: [], shrub: [], rock: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
     // Scenery off the road must clear the opposite carriageway on the left.
     const off = (sd: number, base: number) => (sd > 0 ? base : -(base + (city ? 14 : 9)));
     const each = (spacing: number, fn: (d: number, r: () => number) => void) => {
@@ -647,15 +657,23 @@ export class RoadView {
       // Palms between the median lamps and along both sidewalks.
       each(36, (d, r) => { const { a, pt } = place(d + 18, -7.25); pt.y = a.p.y + 0.22; palm(pt, 0.95 + r() * 0.15, r); });
       each(14, (d, r) => { for (const lat of [6.6, -20.6]) { const { a, pt } = place(d + (lat > 0 ? 0 : 7), lat); pt.y = a.p.y + 0.22; palm(pt, 0.85 + r() * 0.2, r); } });
+      const fill: Bld[] = [];
       if (!scen || scen.buildings < 40) each(18, (d, r) => {
         if (r() < 0.5) {
           const sd = r() > 0.5 ? 1 : -1, lat = off(sd, 80 + 560 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat);
           if (clear(pt, 30, a.i)) {
             const far = Math.abs(lat) / 640, hgt = 16 + r() * (35 + 170 * far), wd = 16 + r() * 24;
-            it.tower.push({ x: pt.x, y: hAt(pt, lat) - 1, z: pt.z, sx: wd, sz: wd * (0.7 + r() * 0.6), sy: hgt, ry: r() * TAU, c: [0xf4efe6, 0xd3dde6, 0xeadbc2, 0xffffff, 0xc4d2dd][(r() * 5) | 0] });
+            // Rectangular footprint, built like an OSM building so it gets real facades, a roof and rooftop plant.
+            const dp = wd * (0.7 + r() * 0.6), ry = r() * TAU, cs = Math.cos(ry), sn = Math.sin(ry);
+            const ring = [[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]].map(([u, v]) => {
+              const x = pt.x + (u * wd * cs - v * dp * sn) / 2, z = pt.z + (u * wd * sn + v * dp * cs) / 2;
+              return [(x + O.x) / KX, (O.y - z) / KY] as LngLat;
+            });
+            fill.push({ rings: [ring], h: hgt, mh: 0, y: hAt(pt, lat) });
           }
         }
       });
+      if (fill.length) buildingMeshes(fill, (p) => { const v = toL(p); return new THREE.Vector2(v.x, -v.z); }, true, { roofUnits: it.roofUnit }).forEach(add);
     } else if (pb === "oasis") {
       each(6, (d, r) => { if (r() < 0.75) { const sd = r() > 0.5 ? 1 : -1, lat = off(sd, 9 + 130 * Math.pow(r(), 1.4)), { a, pt } = place(d, lat); if (clear(pt, 7.5, a.i)) { pt.y = hAt(pt, lat); palm(pt, 0.8 + r() * 0.4, r); } } });
     } else if (pb === "desert") {
@@ -684,7 +702,7 @@ export class RoadView {
     add(inst(GEO.pole, MAT.pole, it.pole)); add(inst(GEO.arm, MAT.pole, it.arm)); add(inst(GEO.lamp, MAT.lamp, it.lamp, false));
     add(inst(GEO.trunk, MAT.trunk, it.trunk)); add(inst(GEO.crown, MAT.frond, it.crown));
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
-    add(inst(GEO.rock, MAT.rock, it.rock)); add(inst(GEO.tower, MAT.tower, it.tower));
+    add(inst(GEO.rock, MAT.rock, it.rock));
     yield;
 
     // Green motorway distance signs every 5 km to the next stop (English + Arabic).
@@ -866,8 +884,19 @@ export class RoadView {
     const sky = fwd.clone().applyAxisAngle(UP, 0.55);
     this.sky.material.uniforms.sunPosition.value.set(sky.x, 0.11, sky.z).normalize();
     const key = fwd.clone().applyAxisAngle(UP, 1.15), ld = V3(key.x * 0.82, 0.55, key.z * 0.82).normalize();
-    this.sun.position.copy(rp).addScaledVector(ld, 50);
-    this.sun.target.position.copy(rp);
+    // Centre the shadow box ahead of the rider, where the camera is looking, and snap it to whole
+    // shadow texels so shadow edges don't shimmer as the rider moves.
+    const sq = QUALITY[this.quality], ahead = rp.clone().addScaledVector(fwd, sq.shadowR * 0.6);
+    if (sq.shadow) {
+      const texel = (sq.shadowR * 2) / sq.shadow;
+      _lm.lookAt(ld, _o, UP);
+      _li.copy(_lm).invert();
+      ahead.applyMatrix4(_li);
+      ahead.x = Math.round(ahead.x / texel) * texel; ahead.y = Math.round(ahead.y / texel) * texel;
+      ahead.applyMatrix4(_lm);
+    }
+    this.sun.position.copy(ahead).addScaledVector(ld, 120);
+    this.sun.target.position.copy(ahead);
     this.base.position.set(rp.x, rp.y - 1.5, rp.z);
     if (this.traffic) this.traffic.update(dt, f.pos, { toL, city: w.biome === "city", lo: w.m0 - 480, hi: w.m0 + 2680 });
     this.renderer.render(this.scene, this.cam);
@@ -893,7 +922,8 @@ export class RoadView {
       if ((o as THREE.InstancedMesh).isInstancedMesh) { (o as THREE.InstancedMesh).dispose(); return; }
       if (mesh.geometry && !shared.has(mesh.geometry)) mesh.geometry.dispose();
       const mat = mesh.material as THREE.Material & { map?: THREE.Texture | null };
-      if (mat?.userData?.ownMap) { mat.map?.dispose(); (mat as THREE.MeshStandardMaterial).normalMap?.dispose(); }
+      if (mat?.userData?.ownMap) mat.map?.dispose();
+      if (mat?.userData?.ownNormal) (mat as THREE.MeshStandardMaterial).normalMap?.dispose();
       if (mat?.userData?.own) mat.dispose();
     });
     this.win = null;
@@ -951,6 +981,8 @@ function estHeight(b: { rings: LngLat[][]; h: number; mh: number }, area: number
 }
 
 type Bld = { rings: LngLat[][]; h: number; mh: number; y: number };
+/** Height over which building walls darken toward the ground. */
+const AO_H = 5;
 const TINTS: Record<FacadeStyle, number[]> = {
   glass: [0xffffff, 0xd2ecff, 0xc9e6dc, 0xf3e0c4, 0xe2e6ea],
   office: [0xffffff, 0xf2ece2, 0xe4eaf0, 0xeee4d6],
@@ -981,16 +1013,22 @@ function buildingMeshes(blds: Bld[], toMap: (p: LngLat) => THREE.Vector2, city: 
     const p0 = b.rings[0][0], st = styleOf(p0, h, area), tints = TINTS[st];
     c.set(tints[Math.floor(hash01(p0[0] * 7.3, p0[1] * 2.9) * tints.length)]);
     const w = (walls[st] ??= { p: [], u: [], c: [] });
+    const cAo = b.mh > 0 ? c : c.clone().multiplyScalar(0.5); // raised parts (bridges, overhangs) aren't on the ground
     const vOff = hash01(p0[0], p0[1] * 5) * 0.5;
     for (const r of rs) {
       let acc = hash01(p0[1], p0[0]) * 24;
       for (let i = 0; i < r.length; i++) {
         const a = r[i], q = r[(i + 1) % r.length], len = a.distanceTo(q), u0 = acc / 24, u1 = (acc + len) / 24;
         acc += len;
-        const v0 = vOff, v1 = vOff + (y1 - y0) / 27.2;
-        w.p.push(a.x, y0, -a.y, q.x, y0, -q.y, q.x, y1, -q.y, a.x, y0, -a.y, q.x, y1, -q.y, a.x, y1, -a.y);
-        w.u.push(u0, v0, u1, v0, u1, v1, u0, v0, u1, v1, u0, v1);
-        for (let k = 0; k < 6; k++) w.c.push(c.r, c.g, c.b);
+        // Two bands: the lowest few metres darken toward the ground (cheap ambient occlusion), the rest is plain.
+        const ya = Math.min(y1, y0 + AO_H), va = vOff + (ya - y0) / 27.2, v1 = vOff + (y1 - y0) / 27.2;
+        const band = (yb: number, yt: number, vb: number, vt: number, cb: THREE.Color, ct: THREE.Color) => {
+          w.p.push(a.x, yb, -a.y, q.x, yb, -q.y, q.x, yt, -q.y, a.x, yb, -a.y, q.x, yt, -q.y, a.x, yt, -a.y);
+          w.u.push(u0, vb, u1, vb, u1, vt, u0, vb, u1, vt, u0, vt);
+          for (const cc of [cb, cb, ct, cb, ct, ct]) w.c.push(cc.r, cc.g, cc.b);
+        };
+        band(y0, ya, vOff, va, cAo, c);
+        if (y1 > ya) band(ya, y1, va, v1, c, c);
       }
     }
     let faces: number[][];
