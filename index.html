@@ -250,6 +250,7 @@ body.demo .stage { height: max(340px, calc(100dvh - 270px)) }
       <h2>Route</h2>
       <div class="field"><label for="fGpx">Import your own route (GPX)</label><input id="fGpx" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml"><small>Draw a route in komoot, Strava or any planner and export it as GPX. It replaces the Emirates Loop until you reset.</small></div>
       <div class="row"><span id="routeName" class="label">Route: Emirates Loop</span><button class="btn sm ghost" id="bRouteReset">Use Emirates Loop</button></div>
+      <small id="routeSrc" style="display:block;color:var(--muted);font-size:13px;margin-top:6px"></small>
       <div class="field"><label>Reset progress</label><div class="row" id="resetRow"><button class="btn sm danger" id="bReset">Reset loop progress and rides</button></div></div>
     </div>
     <div class="card"><h2>Map data</h2><p style="margin:0;color:var(--muted);font-size:14px">Online: © OpenStreetMap contributors via OpenFreeMap and OpenMapTiles; terrain from open elevation tiles on AWS (Mapzen). Offline fallback: Natural Earth (public domain).</p></div>
@@ -324,8 +325,50 @@ function at(r, m) {
   const t = (m - r.cum[lo]) / Math.max(1e-6, r.cum[hi] - r.cum[lo]);
   return { p: [r.pts[lo][0] + (r.pts[hi][0] - r.pts[lo][0]) * t, r.pts[lo][1] + (r.pts[hi][1] - r.pts[lo][1]) * t], i: lo };
 }
+// ---- street-accurate loop (OpenStreetMap via OSRM), fetched once online and cached on the device ----
+const STREET_KEY = "emiratesLoop.street.v1";
+const WAYPTS = ["Abu Dhabi", "Dubai", "Sharjah", "Fujairah", "Hatta", "Al Ain", "Abu Dhabi"];
+function decodePoly(str, prec = 6) {
+  const f = Math.pow(10, prec), out = []; let i = 0, lat = 0, lng = 0;
+  while (i < str.length) {
+    let b, s = 0, r = 0; do { b = str.charCodeAt(i++) - 63; r |= (b & 31) << s; s += 5; } while (b >= 32); lat += (r & 1) ? ~(r >> 1) : (r >> 1);
+    s = 0; r = 0; do { b = str.charCodeAt(i++) - 63; r |= (b & 31) << s; s += 5; } while (b >= 32); lng += (r & 1) ? ~(r >> 1) : (r >> 1);
+    out.push([lng / f, lat / f]);
+  }
+  return out;
+}
+function buildStreet(c) {
+  let pts = decodePoly(c.poly).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
+  pts = densify(pts, 40);
+  const cum = [0]; for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + hav(pts[i - 1], pts[i]));
+  const tot = c.legs.reduce((a, b) => a + b, 0), legsRaw = []; let acc = 0;
+  c.legs.forEach((d, k) => {
+    const target = cum[cum.length - 1] * acc / tot; let lo = 0, hi = cum.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= target) lo = mid; else hi = mid; }
+    legsRaw.push({ from: WAYPTS[k], to: WAYPTS[k + 1], i0: k === 0 ? 0 : lo }); acc += d;
+  });
+  return finish({ name: "Emirates Loop", pts, loop: true, legsRaw, street: true });
+}
+function cachedStreet() { try { const c = JSON.parse(localStorage.getItem(STREET_KEY) || "null"); return c && c.poly && c.legs && c.legs.length === 6 ? c : null; } catch (e) { return null; } }
+async function fetchStreet() {
+  if (cachedStreet()) return false;
+  const coords = WAYPTS.map(n => CITY[n].join(",")).join(";");
+  const ac = new AbortController(), to = setTimeout(() => ac.abort(), 15000);
+  try {
+    const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=polyline6&steps=false`, { signal: ac.signal });
+    const j = await r.json(); clearTimeout(to);
+    if (j.code !== "Ok" || !j.routes || !j.routes[0]) return false;
+    const c = { poly: j.routes[0].geometry, legs: j.routes[0].legs.map(l => l.distance), at: Date.now() };
+    try { localStorage.setItem(STREET_KEY, JSON.stringify(c)); } catch (e) {}
+    return true;
+  } catch (e) { clearTimeout(to); return false; }
+}
 function loadRoute() {
-  if (store.gpx && store.gpx.pts && store.gpx.pts.length > 1) RT = buildGpx(store.gpx.name || "Your route", store.gpx.pts); else RT = buildLoop();
+  const sc = cachedStreet();
+  if (store.gpx && store.gpx.pts && store.gpx.pts.length > 1) RT = buildGpx(store.gpx.name || "Your route", store.gpx.pts);
+  else if (sc) { try { RT = buildStreet(sc); } catch (e) { RT = buildLoop(); } }
+  else RT = buildLoop();
+  const src = $("routeSrc"); if (src) src.textContent = RT.street ? "Street-accurate route: OpenStreetMap data, routed by OSRM." : (store.gpx ? "Your imported GPX route." : "Approximate route (Natural Earth highways). The street-accurate route downloads automatically the first time the app opens online.");
   $("routeName").textContent = "Route: " + RT.name + ` · ${(RT.total / 1000).toFixed(1)} km`;
 }
 loadRoute();
@@ -543,7 +586,7 @@ async function initMap() {
   catch (e) { $("msg").textContent = "The map couldn't start on this device (WebGL is needed)."; return; }
   map.on("styleimagemissing", (e) => { if (map.hasImage(e.id)) return; if (e.id === "sand") map.addImage("sand", SAND); if (e.id === "sea") map.addImage("sea", SEA); });
   $("mapChip").textContent = live ? "Live map · OpenStreetMap" + (store.terrain ? " + 3D terrain" : "") : "Offline map · Natural Earth";
-  $("attr").textContent = live ? "© OpenFreeMap © OpenMapTiles · Data © OpenStreetMap contributors · Terrain: Mapzen/AWS" : "Map: Natural Earth (public domain)";
+  $("attr").textContent = live ? "© OpenFreeMap © OpenMapTiles · Data © OpenStreetMap contributors · Routing: OSRM · Terrain: Mapzen/AWS" : "Map: Natural Earth (public domain)";
   window.addEventListener("resize", () => map && map.resize());
   map.on("load", () => {
     addRouteLayers(); addTerrain(); placeMarkers();
@@ -552,6 +595,7 @@ async function initMap() {
     const meEl = document.createElement("div"); meEl.className = "me-dot"; meEl.hidden = true; meMarker = new ML.Marker({ element: meEl }).setLngLat(startPos).addTo(map);
     const ghEl = document.createElement("div"); ghEl.className = "gh-dot"; ghEl.hidden = true; ghMarker = new ML.Marker({ element: ghEl }).setLngLat(startPos).addTo(map);
     buildStrip(); $("msg").hidden = true; requestAnimationFrame(tick);
+    if (!store.gpx && !RT.street) fetchStreet().then(ok => { if (ok) { applyRoute(); toast("Street-accurate route loaded"); } });
   });
   setTimeout(() => { if (!$("msg").hidden) $("msg").textContent = "The map is taking a while… check your connection or reload."; }, 25000);
 }
