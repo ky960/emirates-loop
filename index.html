@@ -402,7 +402,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 function startRide() { if (RS.state === "idle") { RS.ghostM = 0; RS.arrivals = []; } RS.state = "riding"; keepAwake(); renderControls(); }
 function pauseRide() { RS.state = "paused"; renderControls(); }
 function askFinish() { RS.state = "paused"; $("finishTxt").textContent = `Save this ride? ${(RS.distM / 1000).toFixed(2)} km in ${fmtT(RS.moving || RS.elapsed)}.`; $("finishBox").hidden = false; $("controls").hidden = true; renderControls(); }
-function resetRide() { Object.assign(RS, { state: "idle", distM: 0, elapsed: 0, moving: 0, maxKmh: 0, cadSum: 0, cadS: 0, ghostM: 0 }); $("finishBox").hidden = true; $("controls").hidden = false; try { wake && wake.release(); } catch (e) {} wake = null; renderControls(); }
+function resetRide() { autoArmed = false; idleMove = 0; Object.assign(RS, { state: "idle", distM: 0, elapsed: 0, moving: 0, maxKmh: 0, cadSum: 0, cadS: 0, ghostM: 0 }); $("finishBox").hidden = true; $("controls").hidden = false; try { wake && wake.release(); } catch (e) {} wake = null; renderControls(); }
 function saveRide() {
   const km = RS.distM / 1000; if (km < .05) { toast("Ride too short to save"); resetRide(); return; }
   const prev = bestAvg(), avg = km / ((RS.moving || RS.elapsed) / 3600);
@@ -414,7 +414,7 @@ $("bSave").onclick = saveRide; $("bDiscard").onclick = resetRide; $("bKeep").onc
 function renderControls() {
   const c = $("controls"), on = !!RS.src; let h = "";
   if (!on) h = `<button class="btn primary full" id="cConn">Connect sensor</button><button class="btn ghost full" id="cDemo">Demo ride (no sensor)</button>`;
-  else if (RS.state === "idle") h = `<button class="btn primary full" id="cStart">Start ride</button><button class="btn ghost full" id="cDisc">${RS.src === "demo" ? "Stop demo" : "Disconnect"}</button>`;
+  else if (RS.state === "idle") h = `<button class="btn primary full" id="cStart">Start ride (or just pedal)</button><button class="btn ghost full" id="cDisc">${RS.src === "demo" ? "Stop demo" : "Disconnect"}</button>`;
   else if (RS.state === "riding") h = `<button class="btn" id="cPause">Pause</button><button class="btn primary" id="cFin">Finish</button>`;
   else h = `<button class="btn primary" id="cResume">Resume</button><button class="btn" id="cFin">Finish</button>`;
   c.innerHTML = h;
@@ -580,12 +580,15 @@ function buildStrip() {
 }
 
 // ================= main loop =================
-let last = performance.now(), lastDone = 0, bannerUntil = 0;
+let last = performance.now(), lastDone = 0, bannerUntil = 0, idleMove = 0, autoArmed = true;
 function tick(now) {
   const dt = Math.min(.05, (now - last) / 1000); last = now; const wall = Date.now();
   if (RS.src === "speed" && wall - csc.lw > 3000) RS.kmh = 0;
   if ((RS.src === "speed" || RS.src === "cadence") && wall - csc.lc > 3000) { RS.cad = 0; if (RS.src === "cadence") RS.kmh = 0; }
   if (RS.src === "smart" && wall - RS.lastData > 4000) { RS.kmh = 0; RS.cad = 0; }
+  // auto-start: begin recording once the rider has been pedalling for ~1.5 s
+  if (RS.state === "idle" && RS.src && RS.kmh > 3 && autoArmed) { idleMove += dt; if (idleMove > 1.5) { startRide(); toast("Ride started: pedalling detected"); } } else idleMove = 0;
+  if (RS.kmh < 1) autoArmed = true;
   const mult = RS.src === "demo" ? DEMO.x : 1, prevM = posM();
   if (RS.state === "riding") {
     RS.elapsed += dt * mult;
