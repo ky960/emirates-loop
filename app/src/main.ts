@@ -1,8 +1,9 @@
 import "./styles.css";
 import type { AppCtx } from "./app";
-import { climbBetween, demProfile, flatProfile, gpxProfile, processProfile, type ElevationProfile } from "./elevation";
+import { climbBetween, demProfile, gradeAt, flatProfile, gpxProfile, processProfile, type ElevationProfile } from "./elevation";
 import { RideEngine, type Frame, type RideState } from "./ride/engine";
 import { Ghost, pickBest } from "./ride/ghost";
+import { Pack } from "./ride/pack";
 import { ZONE_COLORS, ZONE_NAMES } from "./ride/metrics";
 import type { RideRecord } from "./ride/types";
 import { avgKmh } from "./ride/types";
@@ -31,6 +32,8 @@ let profile: ElevationProfile = flatProfile(route);
 let ghost = new Ghost(null);
 
 const hub = new SensorHub(() => ({ wheelMm: settings.wheelMm, strokeM: settings.strokeM }));
+// Other cyclists on the road (fewer on the Battery preset).
+const pack = new Pack(settings.quality === "battery" ? 3 : settings.quality === "balanced" ? 6 : 7, () => ({ massKg: settings.weightKg, bikeKg: 9 }));
 const engine = new RideEngine({
   input: hub,
   route: () => route,
@@ -38,11 +41,12 @@ const engine = new RideEngine({
   settings: () => settings,
   basePos: () => nextStart() + DEV_KM * 1000,
   ghost: () => ghost,
+  draft: (pos) => (settings.riders ? pack.draft(pos) : 0),
 });
 const osm = new OsmTiles(14);
 // The skyline needs building heights, which only the z14 tiles carry; share one cache.
 const osmFar = osm;
-const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm, osmFar });
+const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm, osmFar, pack: () => (settings.riders ? pack.bots : []) });
 const mapView = new MapView($("map"), () => settings);
 const audio = new RideAudio();
 audio.enabled = settings.sound;
@@ -406,6 +410,15 @@ function hud(f: Frame, now: number) {
     $("ghostTxt").textContent = gap >= 0 ? "Ghost ahead" : "You lead";
     $("ghostVal").textContent = `${gap >= 0 ? "+" : "−"}${a < 1000 ? a.toFixed(0) + " m" : (a / 1000).toFixed(2) + " km"}`;
   }
+  // Other riders: slipstream, or who's next up the road.
+  const draft = settings.riders ? pack.draft(f.pos) : 0, next = settings.riders ? pack.ahead(f.pos, 400) : null;
+  const pc = $("packChip");
+  pc.hidden = !(draft > 0.02 || next);
+  pc.classList.toggle("draft", draft > 0.02);
+  if (draft > 0.02) { $("packTxt").textContent = "Slipstream"; $("packVal").textContent = `−${Math.round(draft * 100)}% drag`; }
+  else if (next) { $("packTxt").textContent = `${next.bot.name} ahead`; $("packVal").textContent = `${Math.round(next.gap)} m`; }
+  const nb = draft > 0.02 ? pack.ahead(f.pos, 7) : next;
+  if (nb) $("packDot").style.setProperty("--kit", "#" + nb.bot.kit.toString(16).padStart(6, "0"));
   $("simChip").hidden = !f.sim;
   $("banner").classList.toggle("on", now < bannerUntil);
   // next stop card (every 2 s: includes a climb calculation)
@@ -443,6 +456,7 @@ function loop(now: number) {
   lastFrame = now;
   const f = engine.update();
   crank += (f.animRpm / 60) * TAU * dt;
+  if (settings.riders) pack.update(dt, f.pos, f.kmh, f.state === "riding", (m) => gradeAt(profile, route.total, m));
   if (view === "ride") {
     if (camMode === "road" && road.ready) { try { road.render(f, dt, crank); } catch (e) { console.error(e); } }
     mapView.update(f, dt, crank, now);

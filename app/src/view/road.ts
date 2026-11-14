@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { eleAt, type ElevationProfile } from "../elevation";
+import { eleAt, gradeAt, type ElevationProfile } from "../elevation";
 import { hav, type LngLat } from "../geo";
 import type { Frame } from "../ride/engine";
 import type { Route } from "../route";
@@ -13,7 +13,9 @@ import type { OsmData, OsmTiles } from "./osm";
 import { carGeometry, ghafGeometry, JERSEY, palmCrownGeometry, palmTrunkGeometry, sweep, WBEAM } from "./props";
 import { LANDMARKS, loadLandmark, loadModels, type Landmark, type Models, type Part } from "./models";
 import { Pedestrians } from "./people";
-import { buildModelRider, buildRider, type RiderModel } from "./rider";
+import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
+import type { Bot } from "../ride/pack";
+import { buildModelRider, buildRider, DEFAULT_KIT, type RiderModel } from "./rider";
 import { uaeFlagTexture } from "./textures";
 import { barkTexture, blobTexture, facadeTextures, frondTexture, groundDetailTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
 
@@ -602,6 +604,8 @@ export class RoadView {
   private t = 0;
   private quality: Quality;
   private traffic: Traffic | null = null;
+  /** 3D riders for the other cyclists, by bot id; rebuilt as detailed models once those load. */
+  private botModels = new Map<number, RiderModel>();
   private people: Pedestrians | null = null;
   /** Where the current (or next) ride starts; the parking lot is built there. */
   private lotS = 0;
@@ -613,7 +617,7 @@ export class RoadView {
     return b;
   })();
 
-  constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles; osmFar?: OsmTiles }) {
+  constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles; osmFar?: OsmTiles; pack?: () => Bot[] }) {
     this.quality = deps.settings().quality;
   }
 
@@ -1149,6 +1153,9 @@ export class RoadView {
       this.scene.add(mr.g);
       this.rider = mr;
     }
+    // Other cyclists switch to the detailed rider model too.
+    for (const m of this.botModels.values()) this.scene.remove(m.g);
+    this.botModels.clear();
     if (MODELS?.walkers.length && !this.people) {
       this.people = new Pedestrians(MODELS.walkers, QUALITY[this.quality].people);
       this.scene.add(this.people.group);
@@ -1158,6 +1165,30 @@ export class RoadView {
       this.traffic.dispose();
       this.traffic = new Traffic(QUALITY[this.quality].cars);
       this.scene.add(this.traffic.group);
+    }
+  }
+
+  /** Other cyclists: shown within 160 m of you (small and cheap beyond that), each on the left of the lane. */
+  private renderBots(dt: number, pos: number, onPath: (m: number, lat?: number) => { p: THREE.Vector3; t: THREE.Vector3 }) {
+    const bots = this.deps.pack?.() ?? [];
+    for (const [id, m] of this.botModels) if (!bots.some((b) => b.id === id)) m.g.visible = false;
+    const prof = this.deps.profile(), total = this.deps.route().total;
+    for (const b of bots) {
+      const near = Math.abs(b.m - pos) < 160;
+      let model = this.botModels.get(b.id);
+      if (!near) { if (model) model.g.visible = false; continue; }
+      if (!model) {
+        const kit = { ...DEFAULT_KIT, jersey: b.kit };
+        model = (MODELS?.cyclistSrc && buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, kit)) || buildRider(undefined, kit);
+        model.g.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
+        this.scene.add(model.g);
+        this.botModels.set(b.id, model);
+      }
+      const { p, t } = onPath(b.m, b.lat);
+      model.g.visible = true;
+      model.g.position.set(p.x, p.y + 0.13, p.z);
+      model.g.rotation.set(Math.atan(gradeAt(prof, total, b.m)) * 0.9, Math.atan2(-t.x, -t.z), 0, "YXZ");
+      model.update(dt, b.v, b.crank);
     }
   }
 
@@ -1401,6 +1432,7 @@ export class RoadView {
     w.palms?.update(dt, rp, fwd);
     FLAG_TIME.value += dt;
     this.people?.update(dt, f.pos, { onPath, city: w.biome === "city", sidewalkY: 0.22 });
+    this.renderBots(dt, f.pos, onPath);
     if (this.traffic) this.traffic.update(dt, f.pos, { onPath, city: w.biome === "city", lo: w.m0 - 480, hi: w.m0 + 2680 });
     this.renderer.render(this.scene, this.cam);
   }

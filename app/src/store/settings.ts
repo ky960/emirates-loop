@@ -22,6 +22,8 @@ export interface Settings {
   traffic: boolean;
   /** Road view tours the rider: chase, aerial, side and front shots, gliding between them. */
   cinematic: boolean;
+  /** Other cyclists on the road, with slipstream. */
+  riders: boolean;
   showPower: boolean;
   quality: Quality;
   camera: Camera;
@@ -46,6 +48,7 @@ export const DEFAULTS: Settings = {
   sound: true,
   traffic: true,
   cinematic: true,
+  riders: true,
   showPower: false,
   quality: "balanced",
   camera: "road",
