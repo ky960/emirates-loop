@@ -129,8 +129,49 @@ export function buildApproxLoop(): Route {
 export interface StreetCache { poly: string; legs: number[]; at: number }
 
 /** Street-accurate loop from an OSRM polyline6 and per-leg distances. */
+/**
+ * Remove out-and-back spurs: where the road route drives up a street to a waypoint and straight back down it
+ * (e.g. ~500 m each way into central Dubai), the rider would otherwise ride into the oncoming carriageway and
+ * turn round. The spur is cut out so the route turns at its mouth instead.
+ */
+export function removeSpurs(pts: LngLat[], tol = 30, minLen = 40): LngLat[] {
+  const n = pts.length, cum = [0];
+  for (let i = 1; i < n; i++) cum.push(cum[i - 1] + hav(pts[i - 1], pts[i]));
+  const at = (m: number): LngLat => {
+    m = Math.max(0, Math.min(cum[n - 1], m));
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= m) lo = mid; else hi = mid; }
+    const t = (m - cum[lo]) / Math.max(1e-6, cum[hi] - cum[lo]);
+    return [pts[lo][0] + (pts[hi][0] - pts[lo][0]) * t, pts[lo][1] + (pts[hi][1] - pts[lo][1]) * t];
+  };
+  const cuts: Array<[number, number]> = [];
+  for (let i = 1; i < n - 1; i++) {
+    // A spur's tip: the route folds back, so the points 20 m before and after it nearly touch.
+    if (hav(at(cum[i] - 20), at(cum[i] + 20)) > 15) continue;
+    let L = 0;
+    while (L < 5000 && cum[i] - L - 10 > 0 && cum[i] + L + 10 < cum[n - 1] && hav(at(cum[i] - L - 10), at(cum[i] + L + 10)) < tol) L += 10;
+    if (L >= minLen) cuts.push([cum[i] - L, cum[i] + L]);
+  }
+  if (!cuts.length) return pts;
+  const out: LngLat[] = [];
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    while (k < cuts.length && cum[i] > cuts[k][1]) k++;
+    const c = cuts[k];
+    if (c && cum[i] >= c[0] && cum[i] <= c[1]) {
+      if (!out.length || out[out.length - 1] !== pts[i]) { out.push(at(c[0])); out.push(at(c[1])); }
+      // skip to the far end of the cut
+      while (i + 1 < n && cum[i + 1] <= c[1]) i++;
+      k++;
+      continue;
+    }
+    out.push(pts[i]);
+  }
+  return dedupe(out);
+}
+
 export function buildStreetLoop(c: StreetCache): Route {
-  const pts = densify(dedupe(decodePolyline(c.poly)), 40);
+  const pts = densify(removeSpurs(dedupe(decodePolyline(c.poly))), 40);
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + hav(pts[i - 1], pts[i]));
   const tot = c.legs.reduce((a, b) => a + b, 0), legsRaw: RawLeg[] = [];

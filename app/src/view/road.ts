@@ -12,7 +12,9 @@ import { clamp, D2R, hash01, rng, smoothstep, TAU } from "../util";
 import type { OsmData, OsmTiles } from "./osm";
 import { carGeometry, ghafGeometry, JERSEY, palmCrownGeometry, palmTrunkGeometry, sweep, WBEAM } from "./props";
 import { loadModels, type Models, type Part } from "./models";
+import { Pedestrians } from "./people";
 import { buildModelRider, buildRider, type RiderModel } from "./rider";
+import { uaeFlagTexture } from "./textures";
 import { barkTexture, blobTexture, facadeTextures, frondTexture, groundDetailTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
 
 type Biome = "desert" | "city" | "mountains" | "oasis" | "flat";
@@ -22,28 +24,32 @@ const KX = Math.cos(24.8 * D2R) * 111320, KY = 110574;
 const BIOME_LABEL: Record<Biome, string> = { desert: "Desert highway", city: "City", mountains: "Hajar mountains", oasis: "Al Ain oasis", flat: "Coast" };
 
 // palmNear: palms within this many metres ahead use the detailed model; farther ones the light procedural palm.
-const QUALITY: Record<Quality, { grid: number; shadow: number; shadowR: number; dpr: number; buildings: number; palms: number; palmNear: number; cars: number; skyline: number }> = {
-  battery: { grid: 100, shadow: 0, shadowR: 0, dpr: 1, buildings: 700, palms: 160, palmNear: 90, cars: 8, skyline: 0 },
-  balanced: { grid: 150, shadow: 2048, shadowR: 30, dpr: 1.25, buildings: 1800, palms: 300, palmNear: 220, cars: 18, skyline: 500 },
-  max: { grid: 180, shadow: 4096, shadowR: 42, dpr: 1.6, buildings: 2600, palms: 380, palmNear: 380, cars: 26, skyline: 900 },
+// people: pedestrians on the city sidewalks.
+const QUALITY: Record<Quality, { grid: number; shadow: number; shadowR: number; dpr: number; buildings: number; palms: number; palmNear: number; cars: number; skyline: number; people: number }> = {
+  battery: { grid: 100, shadow: 0, shadowR: 0, dpr: 1, buildings: 700, palms: 160, palmNear: 90, cars: 8, skyline: 0, people: 6 },
+  balanced: { grid: 150, shadow: 2048, shadowR: 30, dpr: 1.25, buildings: 1800, palms: 300, palmNear: 220, cars: 18, skyline: 500, people: 14 },
+  max: { grid: 180, shadow: 4096, shadowR: 42, dpr: 1.6, buildings: 2600, palms: 380, palmNear: 380, cars: 26, skyline: 900, people: 22 },
 };
 /** Horizon haze: fog and the far ground fade into the sky colour so there is no hard edge. */
 const HAZE = 0xdcd2c2;
 
 /**
- * Each ride starts in a parking lot on the right of the road at the ride's start position and rolls out
- * onto the road. Distances are along the road from the start (m); lateral offsets are to the right (m).
+ * Each ride starts in a parking lot on the right of the road and rolls out onto it. Distances are along the
+ * road from the ride start (m); lateral offsets are to the right (m). The lot's layout hangs off its exit
+ * point `e`: where the rider has merged into the lane. Usually 72 m; earlier when the road bends soon after
+ * the start, with the lot then reaching back behind the start point.
  */
-const LOT = {
-  a0: -40, a1: 76,          // lot extent along the road
-  l0: 11, l1: 36,           // lot extent to the right (road-side kerb .. back kerb)
-  aisle: 23.5,              // the rider waits in the middle of the aisle
-  exitA0: 36, exitA1: 62,   // gap in the first row of bays where the rider turns out
-  drvA0: 44, drvA1: 74,     // driveway across the verge onto the road
-  roll0: 28, roll1: 72,     // rider leaves the aisle at roll0 and is in the lane by roll1
-};
-/** Rider's lateral offset (m, right of the centreline) `d` metres after the ride start. */
-const lotLat = (d: number) => (d < LOT.roll0 ? LOT.aisle : LOT.aisle + (1.9 - LOT.aisle) * smoothstep(LOT.roll0, LOT.roll1, d));
+const LOT = { l0: 11, l1: 36, aisle: 23.5 }; // lot extent to the right (road-side kerb .. back kerb); aisle centre
+type LotLayout = { e: number; a0: number; a1: number; exitA0: number; exitA1: number; drvA0: number; drvA1: number; roll0: number; s: number };
+const lotLayout = (e: number, a0: number): LotLayout => ({
+  e, a0, a1: e + 4,
+  exitA0: e - 36, exitA1: e - 10, // gap in the first row of bays where the rider turns out
+  drvA0: e - 28, drvA1: e + 2,    // driveway across the verge onto the road
+  roll0: e - 44,                  // the rider leaves the aisle here and is in the lane by e
+  s: Math.max(a0 + 6, e - 72),    // where the rider waits
+});
+/** Rider's lateral offset (m, right of the centreline) at `al` metres along the lot. */
+const lotLat = (al: number, L: LotLayout) => (al < L.roll0 ? LOT.aisle : LOT.aisle + (1.9 - LOT.aisle) * smoothstep(L.roll0, L.e, al));
 
 const lerpAngle = (a: number, b: number, t: number) => a + (((((b - a) % TAU) + TAU * 1.5) % TAU) - Math.PI) * t;
 
@@ -94,6 +100,25 @@ function rTex(w: number, h: number, draw: (c: CanvasRenderingContext2D, w: numbe
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.anisotropy = 8;
   return t;
+}
+
+/**
+ * Round off the corners of a centreline (x and z only; heights are kept): three passes of a ±24 m moving
+ * average, which turns a right-angle junction into a curve of roughly 30 m radius.
+ */
+function smoothPath(C: THREE.Vector3[], passes = 3, k = 4) {
+  const n = C.length;
+  let xs = C.map((c) => c.x), zs = C.map((c) => c.z);
+  for (let p = 0; p < passes; p++) {
+    const nx = new Array<number>(n), nz = new Array<number>(n);
+    for (let i = 0; i < n; i++) {
+      let sx = 0, sz = 0, w = 0;
+      for (let j = -k; j <= k; j++) { const q = Math.min(n - 1, Math.max(0, i + j)); sx += xs[q]; sz += zs[q]; w++; }
+      nx[i] = sx / w; nz[i] = sz / w;
+    }
+    xs = nx; zs = nz;
+  }
+  C.forEach((c, i) => { c.x = xs[i]; c.z = zs[i]; });
 }
 
 /** Strip along the centreline C between lateral offsets o0..o1, following the road's height plus `y`. */
@@ -176,10 +201,12 @@ interface Win {
   biome: Biome;
   label: string;
   palms: PalmLod | null;
+  /** Smoothed centreline the road was built on; the rider, ghost and cars follow it too. */
+  path: { C: THREE.Vector3[]; A: number; step: number };
   /** Ride start (m) this window's parking lot was built for. */
   lotS: number;
   /** The lot's frame (null if there's no room for one here): origin on the centreline at the ride start, along-road and right-hand axes, lot surface height. */
-  lot: { o: THREE.Vector3; t: THREE.Vector3; n: THREE.Vector3; y: number; s: number } | null;
+  lot: { o: THREE.Vector3; t: THREE.Vector3; n: THREE.Vector3; y: number; L: LotLayout } | null;
 }
 
 /** One palm: a detailed-model transform for close range and trunk/crown transforms for the procedural palm. */
@@ -298,9 +325,37 @@ function makeShared() {
     ...facadeMaterials(),
     sign: std(0x8e8e8a, { r: 0.5, m: 0.5 }),
     canopy: std(0xece6d8, { r: 0.9, x: { side: THREE.DoubleSide } }),
+    flower: std(0xffffff, { r: 0.95 }),
+    glass: new THREE.MeshStandardMaterial({ color: 0xbcd6de, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }),
+    shelter: std(0xd9dcde, { r: 0.4, m: 0.6 }),
+    flag: (() => {
+      // Waves in the breeze: ripples travel out from the hoist, growing toward the fly end.
+      const m = new THREE.MeshStandardMaterial({ map: uaeFlagTexture(), side: THREE.DoubleSide, roughness: 0.8 });
+      m.onBeforeCompile = (sh) => {
+        sh.uniforms.flagTime = FLAG_TIME;
+        sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nuniform float flagTime;")
+          .replace("#include <begin_vertex>", "#include <begin_vertex>\nfloat fu = position.x / 1.6;\ntransformed.z += sin(position.x * 3.2 - flagTime * 5.0 + position.y * 1.3) * 0.11 * fu;\ntransformed.y -= 0.06 * fu * fu;");
+      };
+      return m;
+    })(),
   });
   GEO.post = new THREE.BoxGeometry(0.1, 0.95, 0.1).translate(0, 0.475, 0);
   GEO.bay = new THREE.BoxGeometry(0.12, 0.01, 5.4); // parking bay line, lengthwise across the road direction
+  GEO.zebra = new THREE.BoxGeometry(0.5, 0.01, 3.2); // crossing stripe, lengthwise along the road
+  GEO.flower = new THREE.IcosahedronGeometry(1, 1);
+  GEO.flag = new THREE.PlaneGeometry(1.6, 0.8, 16, 4).translate(0.8, 0, 0); // hoist edge at x = 0
+  // Bus shelter (local x along the road, +z toward the back): roof, glass back and ends, posts, bench.
+  GEO.shelterRoof = new THREE.BoxGeometry(4, 0.14, 1.7).translate(0, 2.55, 0.05);
+  GEO.shelterGlass = mergeGeometries([
+    new THREE.BoxGeometry(3.8, 2.1, 0.03).translate(0, 1.35, 0.7),
+    new THREE.BoxGeometry(0.03, 2.1, 1.2).translate(-1.9, 1.35, 0.15),
+    new THREE.BoxGeometry(0.03, 2.1, 1.2).translate(1.9, 1.35, 0.15),
+  ])!;
+  GEO.shelterFrame = mergeGeometries([
+    ...[-1.95, 1.95].flatMap((x) => [new THREE.BoxGeometry(0.08, 2.5, 0.08).translate(x, 1.25, 0.72), new THREE.BoxGeometry(0.08, 2.5, 0.08).translate(x, 1.25, -0.6)]),
+    new THREE.BoxGeometry(2.4, 0.06, 0.42).translate(0, 0.46, 0.42),
+    ...[-1, 1].map((x) => new THREE.BoxGeometry(0.06, 0.46, 0.38).translate(x, 0.23, 0.42)),
+  ])!;
   GEO.refl = new THREE.BoxGeometry(0.105, 0.14, 0.105).translate(0, 0.82, 0);
   GEO.pole = new THREE.CylinderGeometry(0.08, 0.13, 1, 8).translate(0, 0.5, 0);
   GEO.arm = new THREE.BoxGeometry(0.08, 0.08, 1).translate(0, 0, 0.5);
@@ -324,6 +379,8 @@ const SHARED_GEOS = () => {
   MODELS?.palm?.forEach((p) => s.add(p.geo));
   return s;
 };
+/** Time (s) for waving flags. */
+const FLAG_TIME = { value: 0 };
 let groundDetail: THREE.Texture | null = null;
 /** Shared terrain detail map, tiled every ~70 m over the 4.4 km terrain patch. */
 const GROUND_DETAIL = () => {
@@ -391,7 +448,8 @@ function signBoard(name: string, km: number) {
 
 // ---------- traffic ----------
 interface Car { m: number; lane: 0 | 1 | 2; v: number; kind: 0 | 1; idx: number }
-const PAINT = [0xf4f4f2, 0xf4f4f2, 0xeeeeec, 0xb9bdc1, 0x8e9399, 0x2b2e33, 0x17191c, 0x1f3a5c, 0x8a1c1c, 0xcbb592, 0x3d4a3a];
+// Mostly white, silver and black, as on UAE roads, plus cream (Dubai taxis).
+const PAINT = [0xf4f4f2, 0xf4f4f2, 0xeeeeec, 0xb9bdc1, 0x8e9399, 0x2b2e33, 0x17191c, 0x1f3a5c, 0x8a1c1c, 0xcbb592, 0x3d4a3a, 0xe8d9b5, 0xe8d9b5];
 
 /** Cars on both carriageways: some overtake you in the next lane, the rest come the other way. */
 class Traffic {
@@ -459,7 +517,7 @@ class Traffic {
     else c.m = c.lane === 0 ? pos - 260 - r() * 260 : pos + 1250 + r() * 500;
   }
 
-  update(dt: number, pos: number, w: { toL: (m: number) => THREE.Vector3; city: boolean; lo: number; hi: number }) {
+  update(dt: number, pos: number, w: { onPath: (m: number, lat?: number) => { p: THREE.Vector3; t: THREE.Vector3 }; city: boolean; lo: number; hi: number }) {
     if (!this.ready) { this.cars.forEach((c) => this.spawn(c, pos, true)); this.ready = true; }
     const lanes = w.city ? [-1.9, -12.6, -16.4] : [-1.9, -7.45, -11.3];
     for (const c of this.cars) {
@@ -468,11 +526,11 @@ class Traffic {
       const parts = this.parts[c.kind];
       let mtx = this.zero;
       if (c.m > w.lo && c.m < w.hi) {
-        const p = w.toL(c.m), d = w.toL(c.m + 3).sub(w.toL(c.m - 3));
+        // Heading from the car's own lane (offset) path, so it follows the curve of that lane.
+        const L = lanes[c.lane], p = w.onPath(c.m, L).p, d = w.onPath(c.m + 3, L).p.sub(w.onPath(c.m - 3, L).p);
         d.y = 0;
         if (d.lengthSq() > 1e-8) {
           d.normalize();
-          p.addScaledVector(new THREE.Vector3(-d.z, 0, d.x), lanes[c.lane]);
           p.y += 0.1;
           this.e.set(0, Math.atan2(-d.x, -d.z) + (c.lane === 0 ? 0 : Math.PI), 0);
           mtx = this.m4.compose(p, this.q.setFromEuler(this.e), new THREE.Vector3(1, 1, 1));
@@ -507,6 +565,7 @@ export class RoadView {
   private t = 0;
   private quality: Quality;
   private traffic: Traffic | null = null;
+  private people: Pedestrians | null = null;
   /** Where the current (or next) ride starts; the parking lot is built there. */
   private lotS = 0;
   /** Soft contact shadow under the bike: grounds the rider at every quality level, even without shadow maps. */
@@ -605,24 +664,31 @@ export class RoadView {
     const op = pointAt(route, m0).p, O = { x: op[0] * KX, y: op[1] * KY };
     const e0 = eleAt(prof, route.total, m0);
     const toL = (p: LngLat, y = 0) => V3(p[0] * KX - O.x, y, -(p[1] * KY - O.y));
-    const A = -500, B = 2700, STEP = 6, C: THREE.Vector3[] = [];
+    // Centreline samples every STEP m, on a grid fixed to route distance (so every window gets the same points),
+    // then smoothed: the route is a chain of straight segments, and its sharp corners made the rider and cars
+    // snap round and the far lanes jump backwards on the inside of a turn.
+    const STEP = 6, A = Math.ceil((m0 - 500) / STEP) * STEP - m0, B = 2700;
+    const C: THREE.Vector3[] = [];
     for (let d = A; d <= B; d += STEP) C.push(toL(pointAt(route, m0 + d).p, eleAt(prof, route.total, m0 + d) - e0));
+    smoothPath(C);
     const near = new Nearest(C);
     // Parking lot at the ride start: a flat rectangle lined up with the road there, on the right.
     // Left out when it falls outside this window or another stretch of road runs through it (e.g. at a U-turn).
     const lotS = this.lotS, lsRel = lotS - m0, ci = (d: number) => clamp(Math.round((d - A) / STEP), 1, C.length - 2);
-    let lotF: { o: THREE.Vector3; t: THREE.Vector3; n: THREE.Vector3; a0: number; s: number } | null = null;
-    if (lsRel - 40 > A + 30 && lsRel + LOT.a1 < B - 30) {
-      // Lined up with the road just ahead of the start (where the rider rolls out).
-      const i0 = ci(lsRel), t = C[ci(lsRel + 30)].clone().sub(C[i0]).setY(0).normalize(), n = V3(-t.z, 0, t.x), o = C[i0].clone();
-      const clear = (a0: number) => C.every((c) => {
-        const dx = c.x - o.x, dz = c.z - o.z, al = dx * t.x + dz * t.z, lat = dx * n.x + dz * n.z;
-        return !(al > a0 - 10 && al < LOT.a1 + 12 && lat > 4.5 && lat < LOT.l1 + 16);
-      });
-      // Full length if there's room; near a bend or junction, a shorter lot that starts a little ahead
-      // (the rider then begins at its near end, s metres along).
-      const a0 = [LOT.a0, -20, -6, 12, 26].find(clear);
-      if (a0 !== undefined) lotF = { o, t, n, a0, s: Math.max(0, a0 + 6) };
+    let lotF: { o: THREE.Vector3; t: THREE.Vector3; n: THREE.Vector3; L: LotLayout } | null = null;
+    if (lsRel - 112 > A + 30 && lsRel + 80 < B - 30) {
+      // Try the usual layout first, then exits nearer the start (for a bend soon after it), then shorter lots.
+      search: for (const e of [72, 48, 30, 16]) {
+        const o = C[ci(lsRel)].clone(), t = C[ci(lsRel + e)].clone().sub(C[ci(lsRel + e - 36)]).setY(0).normalize(), n = V3(-t.z, 0, t.x);
+        for (const a0 of [e - 112, e - 90, e - 70, e - 56]) {
+          const L = lotLayout(e, a0);
+          const clear = C.every((c) => {
+            const dx = c.x - o.x, dz = c.z - o.z, al = dx * t.x + dz * t.z, lat = dx * n.x + dz * n.z;
+            return !(al > L.a0 - 10 && al < L.a1 + 12 && lat > 4.5 && lat < LOT.l1 + 16);
+          });
+          if (clear) { lotF = { o, t, n, L }; break search; }
+        }
+      }
     }
     /** (x, z) in lot coordinates: metres along the road from the ride start, and to its right. */
     const lotXY = (x: number, z: number) => { const f = lotF!, dx = x - f.o.x, dz = z - f.o.z; return { al: dx * f.t.x + dz * f.t.z, lat: dx * f.n.x + dz * f.n.z }; };
@@ -632,9 +698,10 @@ export class RoadView {
     const inLot = (x: number, z: number, pad = 0) => {
       if (!lotF) return false;
       const { al, lat } = lotXY(x, z);
-      if (al < lotF.a0 - pad || al > LOT.a1 + pad) return false;
+      const L = lotF.L;
+      if (al < L.a0 - pad || al > L.a1 + pad) return false;
       if (lat > LOT.l0 - 1.5 - pad && lat < LOT.l1 + 1.5 + pad) return true;
-      return al > LOT.drvA0 - pad && al < LOT.drvA1 + pad && lat > 3.5 - pad && lat < LOT.l0 + pad;
+      return al > L.drvA0 - pad && al < L.drvA1 + pad && lat > 3.5 - pad && lat < LOT.l0 + pad;
     };
     const zoneP = pointAt(route, m0 + 500).p, zoneEle = eleAt(prof, route.total, m0 + 500);
     const zone = zoneAt(zoneP, zoneEle);
@@ -691,7 +758,7 @@ export class RoadView {
       R(-13.4, -5.5, 0.1, MAT.asph); R(-9.56, -9.34, 0.14, MAT.dash, 12);
       R(-5.88, -5.72, 0.14, MAT.yellow); R(-13.2, -13.04, 0.14, MAT.white);
       // Right-hand guardrail, with a gap for the parking-lot driveway.
-      const gap = lotF ? [ci(lsRel + LOT.drvA0 - 3), ci(lsRel + LOT.drvA1 + 3)] : null;
+      const gap = lotF ? [ci(lsRel + lotF.L.drvA0 - 3), ci(lsRel + lotF.L.drvA1 + 3)] : null;
       for (const [i0, i1] of gap ? [[0, gap[0]], [gap[1], C.length - 1]] : [[0, C.length - 1]]) {
         if (i1 - i0 < 2) continue;
         const rail = mk(sweep(C.slice(i0, i1 + 1), WBEAM, 7.05), MAT.wbeam); rail.castShadow = true; add(rail);
@@ -755,7 +822,7 @@ export class RoadView {
     yield;
 
     // Props, placed by route distance so they don't jump when the window is rebuilt.
-    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
+    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], flag: [], flower: [], zebra: [], shelter: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
     // Scenery off the road must clear the opposite carriageway on the left.
     const off = (sd: number, base: number) => (sd > 0 ? base : -(base + (city ? 14 : 9)));
     const each = (spacing: number, fn: (d: number, r: () => number) => void) => {
@@ -800,6 +867,39 @@ export class RoadView {
       // Palms between the median lamps and along both sidewalks.
       each(36, (d, r) => { const { a, pt } = place(d + 18, -7.25); pt.y = a.p.y + 0.22; palm(pt, 0.95 + r() * 0.15, r); });
       each(14, (d, r) => { for (const lat of [6.6, -20.6]) { const { a, pt } = place(d + (lat > 0 ? 0 : 7), lat); pt.y = a.p.y + 0.22; palm(pt, 0.85 + r() * 0.2, r); } });
+      // Waving UAE flags on the median lamp posts, facing the traffic.
+      each(36, (d) => {
+        const { a, pt } = place(d, -7.25 + 0.14);
+        if (inLot(pt.x, pt.z, 2)) return;
+        it.flag.push({ x: pt.x, y: a.p.y + 7.6, z: pt.z, ry: Math.atan2(-a.n.z, a.n.x) });
+      });
+      // Bougainvillea and clipped shrubs in the median, kept clear of the lamp posts and palms.
+      // Low clumps of a few overlapping mounds: green shrub with bougainvillea flowering on top.
+      each(2.5, (d, r) => {
+        const k = ((d + m0) % 18 + 18) % 18;
+        if (k < 1.6 || k > 16.4 || r() < 0.2) return;
+        const lat = -4.8 - r() * 5, bloom = r() < 0.6, hue = [0xd8287a, 0xe0479a, 0xc2246a, 0xf06aa8, 0xe8505a][Math.floor(r() * 5)];
+        for (let j = 0; j < 3; j++) {
+          const { a, pt } = place(d + (r() - 0.5) * 1.4, lat + (r() - 0.5) * 1.2), s2 = 0.22 + r() * 0.22;
+          const c = bloom && (j > 0 || r() < 0.5) ? hue : [0x4f7a2e, 0x3f6a26, 0x5f8a36][Math.floor(r() * 3)];
+          it.flower.push({ x: pt.x, y: a.p.y + 0.22 + s2 * 0.3, z: pt.z, sx: s2 * 1.3, sy: s2 * 0.75, sz: s2 * 1.3, ry: r() * TAU, c });
+        }
+      });
+      // Zebra crossings over both carriageways.
+      each(320, (d) => {
+        const { a } = place(d + 160, 0), ry = Math.atan2(a.t.x, a.t.z);
+        if (inLot(a.p.x + a.n.x * 2, a.p.z + a.n.z * 2, 30)) return;
+        for (const [l0, l1] of [[-3.5, 3.5], [-18, -11]]) for (let lat = l0; lat <= l1; lat += 1) {
+          const pt = a.p.clone().addScaledVector(a.n, lat);
+          it.zebra.push({ x: pt.x, y: a.p.y + 0.106, z: pt.z, ry });
+        }
+      });
+      // Bus shelters on the sidewalk, midway between two sidewalk palms.
+      each(420, (d) => {
+        const { a, pt } = place(d + 7, 7.7);
+        if (inLot(pt.x, pt.z, 4)) return;
+        it.shelter.push({ x: pt.x, y: a.p.y + 0.22, z: pt.z, ry: Math.atan2(a.n.x, a.n.z) });
+      });
       const fill: Bld[] = [];
       if (!scen || scen.buildings < 40) each(18, (d, r) => {
         if (r() < 0.5) {
@@ -846,7 +946,7 @@ export class RoadView {
     // ---- Parking lot at the ride start: two rows of bays, shade canopies, lamps, palms, parked cars. ----
     const lotY = city ? 0.25 : 0.1;
     if (lotF) {
-      const r = rng(Math.floor(lotS) * 13 + 7), ly = lotF.o.y + lotY;
+      const r = rng(Math.floor(lotS) * 13 + 7), ly = lotF.o.y + lotY, L = lotF.L;
       /** Flat quad in lot coordinates (al0..al1 along, o0..o1 across) at height y; `y1` tilts it across. */
       const quad = (al0: number, al1: number, o0: number, o1: number, y: number, mat: THREE.Material, y1 = y, uScale = 7.6) => {
         const pts = [lotP(al0, o0, y), lotP(al0, o1, y1), lotP(al1, o0, y), lotP(al1, o1, y1)], g = new THREE.BufferGeometry();
@@ -860,12 +960,12 @@ export class RoadView {
         add(m);
         return m;
       };
-      quad(lotF.a0, LOT.a1, LOT.l0, LOT.l1, ly, MAT.asph);
+      quad(L.a0, L.a1, LOT.l0, LOT.l1, ly, MAT.asph);
       // Driveway: from the road's edge (following the road) to the lot's edge (flat).
       {
         const pos: number[] = [], uv: number[] = [], idx: number[] = [], e0 = city ? 3.75 : 6.6, steps = 8;
         for (let k = 0; k <= steps; k++) {
-          const al = LOT.drvA0 + ((LOT.drvA1 - LOT.drvA0) * k) / steps, road = place(lsRel + al, e0), lotEdge = lotP(al, LOT.l0 + 0.5, ly + 0.004);
+          const al = L.drvA0 + ((L.drvA1 - L.drvA0) * k) / steps, road = place(lsRel + al, e0), lotEdge = lotP(al, LOT.l0 + 0.5, ly + 0.004);
           pos.push(road.pt.x, road.a.p.y + lotY + 0.004, road.pt.z, lotEdge.x, lotEdge.y, lotEdge.z);
           uv.push(0, al / 9, 1, al / 9);
           if (k < steps) idx.push(k * 2, k * 2 + 1, k * 2 + 2, k * 2 + 1, k * 2 + 3, k * 2 + 2);
@@ -879,24 +979,24 @@ export class RoadView {
         add(mk(g, MAT.asph));
       }
       const kerb = city ? MAT.kerbPaint : MAT.kerb;
-      quad(lotF.a0, LOT.drvA0, LOT.l0 - 0.3, LOT.l0, ly + 0.02, kerb, ly + 0.02, 0.3);
-      quad(LOT.drvA1, LOT.a1, LOT.l0 - 0.3, LOT.l0, ly + 0.02, kerb, ly + 0.02, 0.3);
-      quad(lotF.a0, LOT.a1, LOT.l1, LOT.l1 + 0.3, ly + 0.02, kerb, ly + 0.02, 0.3);
+      quad(L.a0, L.drvA0, LOT.l0 - 0.3, LOT.l0, ly + 0.02, kerb, ly + 0.02, 0.3);
+      quad(L.drvA1, L.a1, LOT.l0 - 0.3, LOT.l0, ly + 0.02, kerb, ly + 0.02, 0.3);
+      quad(L.a0, L.a1, LOT.l1, LOT.l1 + 0.3, ly + 0.02, kerb, ly + 0.02, 0.3);
       // Shade canopies over the far row (a common sight in UAE car parks), sloping down toward the aisle.
-      const cm = quad(lotF.a0 + 2, LOT.a1 - 2, 28.6, LOT.l1 + 0.2, ly + 2.5, MAT.canopy, ly + 3.2);
+      const cm = quad(L.a0 + 2, L.a1 - 2, 28.6, LOT.l1 + 0.2, ly + 2.5, MAT.canopy, ly + 3.2);
       cm.castShadow = true;
       const ry = Math.atan2(lotF.n.x, lotF.n.z), lotItems: Record<string, Item[]> = { bay: [], post: [], pole: [], arm: [], lamp: [] };
-      for (let k = Math.ceil(lotF.a0 / 2.7); k * 2.7 < LOT.a1 - 2; k++) {
+      for (let k = Math.ceil(L.a0 / 2.7); k * 2.7 < L.a1 - 2; k++) {
         const al = k * 2.7;
         for (const [lat, row] of [[15, 1], [32, 2]] as const) {
-          if (row === 1 && al > LOT.exitA0 && al < LOT.exitA1) continue;
+          if (row === 1 && al > L.exitA0 && al < L.exitA1) continue;
           const sp = lotP(al, lat, ly + 0.012);
           lotItems.bay.push({ x: sp.x, y: sp.y, z: sp.z, ry });
           if (row === 2 && k % 2 === 0) { const pp = lotP(al, LOT.l1 - 0.4, ly); lotItems.post.push({ x: pp.x, y: pp.y, z: pp.z, sx: 0.55, sz: 0.55, sy: 3.2 }); }
         }
       }
       // Lamp posts between the first row and the aisle, lighting both rows.
-      for (const al of [-24, 8, 70].filter((x) => x > lotF.a0 + 2)) {
+      for (const al of [L.e - 96, L.e - 64, L.e - 2].filter((x) => x > L.a0 + 2)) {
         const pt = lotP(al, 18.7, ly), top = 11;
         lotItems.pole.push({ x: pt.x, y: pt.y, z: pt.z, sy: top });
         for (const sd of [1, -1]) {
@@ -911,10 +1011,10 @@ export class RoadView {
       const kinds = MODELS?.cars ?? [];
       if (kinds.length) {
         const cars = kinds.map(() => ({ paint: [] as Item[], plain: [] as Item[] }));
-        for (let k = Math.ceil(lotF.a0 / 2.7); (k + 1) * 2.7 < LOT.a1 - 2; k++) {
+        for (let k = Math.ceil(L.a0 / 2.7); (k + 1) * 2.7 < L.a1 - 2; k++) {
           const al = k * 2.7 + 1.35;
           for (const row of [1, 2]) {
-            if (r() > 0.55 || (row === 1 && al > LOT.exitA0 - 3 && al < LOT.exitA1 + 3)) continue;
+            if (r() > 0.55 || (row === 1 && al > L.exitA0 - 3 && al < L.exitA1 + 3)) continue;
             const pt = lotP(al, row === 1 ? 15 : 32.2, ly), f = lotF.n.clone().multiplyScalar(row === 1 ? -1 : 1);
             const ki = Math.floor(r() * kinds.length), cry = Math.atan2(-f.x, -f.z) + (r() - 0.5) * 0.06;
             const base = { x: pt.x, y: pt.y, z: pt.z, ry: cry };
@@ -924,9 +1024,9 @@ export class RoadView {
         }
         kinds.forEach((parts, ki) => parts.forEach((p) => add(inst(p.geo, p.mat, p.paint ? cars[ki].paint : cars[ki].plain, !!p.shadow))));
       }
-      for (let al = lotF.a0 + 3; al < LOT.a1 - 2; al += 10) {
+      for (let al = L.a0 + 3; al < L.a1 - 2; al += 10) {
         for (const lat of [LOT.l1 + 2.2, 9.6]) {
-          if (lat < 10 && al > LOT.drvA0 - 4 && al < LOT.drvA1 + 4) continue;
+          if (lat < 10 && al > L.drvA0 - 4 && al < L.drvA1 + 4) continue;
           palm(lotP(al, lat, ly), 0.85 + r() * 0.2, r, true);
         }
       }
@@ -935,6 +1035,8 @@ export class RoadView {
     const palmLod = palms.length ? new PalmLod(palms, MODELS?.palm ? q.palmNear : 0, group) : null;
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
     add(inst(GEO.rock, MAT.rock, it.rock));
+    add(inst(GEO.flag, MAT.flag, it.flag)); add(inst(GEO.flower, MAT.flower, it.flower, false)); add(inst(GEO.zebra, MAT.white, it.zebra, false));
+    add(inst(GEO.shelterRoof, MAT.shelter, it.shelter)); add(inst(GEO.shelterFrame, MAT.shelter, it.shelter)); add(inst(GEO.shelterGlass, MAT.glass, it.shelter, false));
     yield;
 
     // Green motorway distance signs every 5 km to the next stop (English + Arabic).
@@ -965,7 +1067,7 @@ export class RoadView {
     }
     const label = BIOME_LABEL[pb] + (scen?.buildings ? ` · ${scen.buildings} buildings from OpenStreetMap` : "");
     const osmState = ctx.state === "none" ? "none" : ctx.state === "complete" && (far.state === "complete" || far.state === "none") ? "complete" : "partial";
-    return { group, m0, O, e0, route, osmState, keys, farKeys, profile: prof, biome: pb, label, palms: palmLod, lotS, lot: lotF ? { o: lotF.o, t: lotF.t, n: lotF.n, s: lotF.s, y: lotY } : null };
+    return { group, m0, O, e0, route, osmState, keys, farKeys, profile: prof, biome: pb, label, palms: palmLod, path: { C, A, step: STEP }, lotS, lot: lotF ? { o: lotF.o, t: lotF.t, n: lotF.n, L: lotF.L, y: lotY } : null };
   }
 
   /** Swap the detailed models in: rebuild the current window (palms), the traffic and the rider. */
@@ -980,6 +1082,10 @@ export class RoadView {
       mr.g.add(this.blob);
       this.scene.add(mr.g);
       this.rider = mr;
+    }
+    if (MODELS?.walkers.length && !this.people) {
+      this.people = new Pedestrians(MODELS.walkers, QUALITY[this.quality].people);
+      this.scene.add(this.people.group);
     }
     if (this.traffic) {
       this.scene.remove(this.traffic.group);
@@ -1089,18 +1195,19 @@ export class RoadView {
       else if (f.pos > this.win!.m0 + 2400) { while (!r.done) r = this.building.gen.next(); this.swapIn(r.value); this.building = null; }
     }
     const w = this.win!;
-    const prof = this.deps.profile();
-    const toL = (m: number) => {
-      const p = pointAt(route, m).p;
-      return V3(p[0] * KX - w.O.x, eleAt(prof, route.total, m) - w.e0, -(p[1] * KY - w.O.y));
-    };
     const m = f.pos, mps = f.kmh / 3.6;
+    /** Point `lat` metres right of the smoothed centreline at route distance mm, and the direction of travel there. */
+    const onPath = (mm: number, lat = 0) => {
+      const { C, A, step } = w.path, x = (mm - w.m0 - A) / step, i = clamp(Math.floor(x), 1, C.length - 3), t = clamp(x - i, 0, 1);
+      const p = C[i].clone().lerp(C[i + 1], t);
+      const tan = C[i + 1].clone().sub(C[i - 1]).lerp(C[i + 2].clone().sub(C[i]), t).setY(0);
+      if (tan.lengthSq() < 1e-8) tan.set(0, 0, -1);
+      tan.normalize();
+      return { p: p.addScaledVector(V3(-tan.z, 0, tan.x), lat), t: tan };
+    };
     // In the lane: 1.9 m right of the centreline; asphalt sits 0.10 m above it and the tyres touch it.
     const lane = (mm: number) => {
-      const d0 = toL(mm + 3).sub(toL(mm - 3)); d0.y = 0;
-      if (d0.lengthSq() < 1e-8) d0.set(0, 0, -1);
-      d0.normalize();
-      const p = toL(mm).addScaledVector(V3(-d0.z, 0, d0.x), 1.9);
+      const p = onPath(mm, 1.9).p;
       p.y += 0.13;
       return p;
     };
@@ -1108,13 +1215,13 @@ export class RoadView {
     const lot = w.lotS === f.startM ? w.lot : null;
     const riderAt = (mm: number) => {
       const d = mm - w.lotS;
-      if (!lot || d > LOT.roll1) return lane(mm);
+      if (!lot || d > lot.L.e) return lane(mm);
       // Ride distance d maps onto the lot path from its start s to the lane at roll1.
-      const al = lot.s + Math.max(0, d) * (LOT.roll1 - lot.s) / LOT.roll1, lat = lotLat(al);
+      const L = lot.L, al = L.s + (Math.max(0, d) * (L.e - L.s)) / L.e, lat = lotLat(al, L);
       const p = lot.o.clone().addScaledVector(lot.t, al).addScaledVector(lot.n, lat);
       // Lot surface height across the lot; down the driveway toward the road's height at the kerb.
       p.y = lot.o.y + lot.y + 0.03;
-      const k = smoothstep(LOT.roll1 - 18, LOT.roll1, d), l = lane(mm);
+      const k = smoothstep(L.e - 18, L.e, al), l = lane(mm);
       p.y = THREE.MathUtils.lerp(p.y, l.y, smoothstep(LOT.l0 + 0.5, 3.8, lat));
       return p.lerp(l, k);
     };
@@ -1133,7 +1240,7 @@ export class RoadView {
     const want = rp.clone().addScaledVector(fwd, -(portrait ? 4.4 : 5.2) - sp * 0.6).addScaledVector(right, portrait ? 0.8 : 1.2);
     want.y = rp.y + (portrait ? 2.3 : 1.95) + Math.sin(this.t * 0.4) * 0.05;
     const lookW = rp.clone().addScaledVector(fwd, 9);
-    lookW.y = toL(m + 9).y + 1.05;
+    lookW.y = onPath(m + 9).p.y + 1.05;
     this.t += dt;
     const offW = want.clone().sub(rp), lookOffW = lookW.clone().sub(rp);
     if (!this.camOff || !isFinite(this.camOff.x + this.camOff.y + this.camOff.z)) { this.camOff = offW.clone(); this.lookOff = lookOffW.clone(); }
@@ -1148,10 +1255,10 @@ export class RoadView {
     const G = this.ghost.g;
     const gNear = f.ghostOn && Math.abs(f.ghostGap) < 320;
     if (gNear) {
-      const gd = toL(f.ghostPos + 5).sub(toL(f.ghostPos - 5)); gd.y = 0;
-      if (gd.lengthSq() < 1e-8) gd.set(0, 0, -1);
+      const gp = onPath(f.ghostPos, 0.5), gd = onPath(f.ghostPos + 2, 0.5).p.sub(onPath(f.ghostPos - 2, 0.5).p).setY(0);
+      if (gd.lengthSq() < 1e-8) gd.copy(gp.t);
       gd.normalize();
-      G.position.copy(toL(f.ghostPos).addScaledVector(V3(-gd.z, 0, gd.x), 0.5));
+      G.position.copy(gp.p);
       G.position.y += 0.1;
       G.rotation.y = Math.atan2(-gd.x, -gd.z);
       this.ghost.update(dt, mps || 7, crank * 1.02);
@@ -1176,7 +1283,9 @@ export class RoadView {
     this.sun.target.position.copy(ahead);
     this.base.position.set(rp.x, rp.y - 1.5, rp.z);
     w.palms?.update(dt, rp, fwd);
-    if (this.traffic) this.traffic.update(dt, f.pos, { toL, city: w.biome === "city", lo: w.m0 - 480, hi: w.m0 + 2680 });
+    FLAG_TIME.value += dt;
+    this.people?.update(dt, f.pos, { onPath, city: w.biome === "city", sidewalkY: 0.22 });
+    if (this.traffic) this.traffic.update(dt, f.pos, { onPath, city: w.biome === "city", lo: w.m0 - 480, hi: w.m0 + 2680 });
     this.renderer.render(this.scene, this.cam);
   }
 

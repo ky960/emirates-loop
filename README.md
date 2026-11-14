@@ -8,7 +8,7 @@ Built for one rider on a Samsung Galaxy Tab S7+ in Chrome, with a CYCPLUS speed/
 
 - **Sensors:** any number of Bluetooth sensors at once. Speed (CSC wheel), cadence (CSC crank), heart rate, and smart trainers (FTMS). A CYCPLUS unit in speed mode (blue light) or cadence mode (green light) is detected automatically. Sensors reconnect on their own after a dropout.
 - **Real gradients:** elevation comes from the open terrain model (or the GPX file). With "Climbs slow you down" on, your sensor speed counts as flat-road effort and the route's gradient changes your virtual speed.
-- **3D road view:** the road follows the real elevation. Detailed 3D models for the rider, date palms and traffic (Camry, Patrol). Real buildings, parks and water come from OpenStreetMap. Desert, city, oasis and Hajar mountain scenery, green distance signs in English and Arabic, and a rider whose legs follow your cadence (estimated from speed when only a speed sensor is connected).
+- **3D road view:** the road follows the real elevation. Detailed 3D models for the rider, date palms and traffic (Camry, Patrol). City streets have people walking, waving UAE flags, bougainvillea in the median, zebra crossings and bus shelters. Real buildings, parks and water come from OpenStreetMap. Desert, city, oasis and Hajar mountain scenery, green distance signs in English and Arabic, and a rider whose legs follow your cadence (estimated from speed when only a speed sensor is connected).
 - **Picks up where you left off:** each ride starts where your saved rides ended, so the 618 km loop is ridden over many sessions. Every ride begins in a roadside car park and rolls out onto the road.
 - **Ghost:** replays your best ride second by second.
 - **Trustworthy data:**
@@ -55,3 +55,6 @@ Both share the same origin, so the new app imports the old app's settings and ri
   - `date_palm.glb`: ["Date Palm"](https://sketchfab.com/3d-models/date-palm-11acf710e6c149daa8d6fb8cdc5d087f) by evolveduk
   - `camry.glb`: ["Toyota Camry 40"](https://sketchfab.com/3d-models/toyota-camry-40-560c174d073f4a10bb153ded41ada8c9) by Ford mondeo
   - `patrol.glb`: ["Nissan Patrol Nismo"](https://sketchfab.com/3d-models/nissan-patrol-nismo-80162fe6fadd4650a2a6c38fca3662a0) by radekstepan
+  - `ped_nathan.glb`: ["Nathan Animated 003 - Walking 3D Man"](https://sketchfab.com/3d-models/nathan-animated-003-walking-3d-man-143a2b1ea5eb4385ae90a73657aca3bc) by Renderpeople
+  - `ped_eric.glb`: ["Eric Rigged 001 - Rigged 3D Business Man"](https://sketchfab.com/3d-models/eric-rigged-001-rigged-3d-business-man-a46bc9f67aaa415bb4f3241eef900e7f) by Renderpeople (walks with Nathan's animation)
+  - `ped_claudia.glb`: ["Claudia Rigged 002 - 3D Rigged Business Women"](https://sketchfab.com/3d-models/claudia-rigged-002-3d-rigged-business-women-c659bd0accab47c6bbe390cf822a2b92) by Renderpeople (walks with Nathan's animation)

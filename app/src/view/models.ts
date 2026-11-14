@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { makeWalkers, type Walker } from "./people";
 
 /**
  * Realistic 3D models (Sketchfab, CC BY 4.0; credits in the README and the About panel),
@@ -11,9 +12,11 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 
 /** One piece of a model, baked into model space (metres, ground at y = 0, facing -Z). */
 export interface Part { geo: THREE.BufferGeometry; mat: THREE.Material; paint?: boolean; shadow?: boolean }
-export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF }
+export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; walkers: Walker[] }
 
 const FILES = { palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb" };
+/** Pedestrians (RenderPeople, CC BY 4.0); the first one carries the walk cycle. */
+const PEOPLE = ["ped_nathan.glb", "ped_eric.glb", "ped_claudia.glb"];
 
 /** Real overall lengths (m) the car models are scaled to. */
 const CAR_LENGTH = { camry: 4.85, patrol: 5.3 };
@@ -77,8 +80,9 @@ export async function loadModels(base: string): Promise<Models> {
   const L = new GLTFLoader();
   L.setMeshoptDecoder(MeshoptDecoder);
   const get = (f: string) => L.loadAsync(base + "models/" + f).catch((e) => { console.warn("model failed to load", f, e); return null; });
-  const [palm, camry, patrol, cyclist] = await Promise.all([get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist)]);
-  const out: Models = { palmHeight: 7.34, cars: [] };
+  const [palm, camry, patrol, cyclist, ...people] = await Promise.all([get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), ...PEOPLE.map(get)]);
+  const out: Models = { palmHeight: 7.34, cars: [], walkers: [] };
+  try { out.walkers = makeWalkers(people.filter((g): g is GLTF => !!g)); } catch (e) { console.warn("pedestrians unavailable", e); }
 
   if (palm) {
     palm.scene.updateMatrixWorld(true);

@@ -97,7 +97,7 @@ export function renderSettings(el: HTMLElement, ctx: AppCtx) {
       <h2>About</h2>
       <p class="muted" style="margin:0">Emirates Loop ${info.version} · ${info.map}${info.scene ? ` · ${info.scene}` : ""}</p>
       <p class="muted" style="margin:8px 0 0;font-size:14px">Map data © OpenStreetMap contributors via OpenFreeMap and OpenMapTiles. Routing by OSRM. Terrain from open elevation tiles on AWS (Mapzen). Offline fallback: Natural Earth (public domain).</p>
-      <p class="muted" style="margin:8px 0 0;font-size:14px">3D models from Sketchfab, licensed CC BY 4.0: "Rigged cyclist" by novusod, "Date Palm" by evolveduk, "Toyota Camry 40" by Ford mondeo, "Nissan Patrol Nismo" by radekstepan. Compressed and adapted (jersey, helmet, pedalling) for this app. Sky lighting: "Quarry 01" HDRI by Poly Haven (CC0).</p>
+      <p class="muted" style="margin:8px 0 0;font-size:14px">3D models from Sketchfab, licensed CC BY 4.0: "Rigged cyclist" by novusod, "Date Palm" by evolveduk, "Toyota Camry 40" by Ford mondeo, "Nissan Patrol Nismo" by radekstepan; pedestrians "Nathan Animated 003", "Eric Rigged 001" and "Claudia Rigged 002" by Renderpeople. Compressed and adapted (jersey, helmet, pedalling) for this app. Sky lighting: "Quarry 01" HDRI by Poly Haven (CC0).</p>
     </div>
   </div>`.s;
 
