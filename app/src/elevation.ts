@@ -46,22 +46,26 @@ function boxAvg(a: Float32Array, w: number, loop: boolean): Float32Array {
 }
 
 /**
- * Turn raw elevation samples into a rideable profile: remove spikes (bridges, DEM noise),
- * smooth, and derive a gradient over a ~200 m window, clamped to ±18 %.
+ * Turn raw elevation samples into a rideable profile. The terrain model is satellite radar: over towns it measures
+ * rooftops and trees too, so flat roads show 5-10 m bumps every few hundred metres. Those became fake 2-4 % climbs
+ * (~280 m of "climbing" between Abu Dhabi and Dubai). So: a ~600 m median removes towers and spikes, ~1 km of
+ * averaging removes the rest, and the gradient is taken over ~600 m. Real climbs (the Hajar mountains, Hatta,
+ * Al Ain) span kilometres and keep their 3-7 % grades.
  */
 export function processProfile(raw: Float32Array, step: number, loop: boolean, source: ElevationProfile["source"]): ElevationProfile {
   const n = raw.length;
   const cleaned = raw.map((v) => (isFinite(v) ? Math.max(0, v) : 0));
-  let ele = median(cleaned, 9, loop);
-  ele = boxAvg(ele, 9, loop);
-  ele = boxAvg(ele, 5, loop);
-  const g = new Float32Array(n), W = Math.max(1, Math.round(100 / step));
+  const win = (m: number) => Math.max(1, Math.round(m / step)) | 1; // odd window of about m metres
+  let ele = median(cleaned, win(625), loop);
+  ele = boxAvg(ele, win(1025), loop);
+  ele = boxAvg(ele, win(525), loop);
+  const g = new Float32Array(n), W = Math.max(1, Math.round(300 / step));
   for (let i = 0; i < n; i++) {
     const a = ele[idx(n, i - W, loop)], b = ele[idx(n, i + W, loop)];
     const span = loop ? 2 * W * step : (idx(n, i + W, false) - idx(n, i - W, false)) * step || step;
     g[i] = clamp((b - a) / span, -0.18, 0.18);
   }
-  const grade = boxAvg(g, 5, loop);
+  const grade = boxAvg(g, win(225), loop);
   let gain = 0, loss = 0, min = Infinity, max = -Infinity;
   // Hysteresis of 2 m so DEM ripple doesn't inflate climbing totals.
   let ref = ele[0];
