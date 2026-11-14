@@ -546,6 +546,9 @@ class Traffic {
   reset() { this.ready = false; }
 }
 
+/** A camera position around the rider: angle from straight ahead (toward the right), distance, height; where it looks. */
+interface Shot { az: number; back: number; up: number; ahead: number; lookH: number }
+
 // =====================================================================================
 export class RoadView {
   ready = false;
@@ -563,6 +566,38 @@ export class RoadView {
   private building: { gen: Generator<void, Win, void>; m0: number } | null = null;
   private yaw: number | undefined;
   private camOff: THREE.Vector3 | null = null;
+  private shotT = 0;
+  /**
+   * Cinematic camera: a minute of the chase view, then an aerial, a side and a front shot, gliding between them.
+   * Shots are positions on a circle around the rider (angle, distance, height) so a change swings the camera round
+   * the rider rather than through them.
+   */
+  private director(dt: number, chase: Shot): Shot {
+    const shots: Array<[Shot, number]> = [
+      [chase, 60],
+      [{ az: Math.PI * 0.97, back: 15, up: 26, ahead: 2, lookH: 0 }, 14], // high aerial, from behind
+      [{ az: -Math.PI / 2, back: 6.2, up: 1.4, ahead: 0.6, lookH: 0.95 }, 14], // side, from the left
+      [{ az: 0.18, back: 7.5, up: 1.7, ahead: 0, lookH: 1.1 }, 12], // front, slightly to the right
+    ];
+    const GLIDE = 5, total = shots.reduce((a, [, d]) => a + d + GLIDE, 0);
+    this.shotT = (this.shotT + dt) % total;
+    let t = this.shotT;
+    for (let i = 0; i < shots.length; i++) {
+      const [a, hold] = shots[i], b = shots[(i + 1) % shots.length][0];
+      if (t < hold) return a;
+      t -= hold;
+      if (t < GLIDE) {
+        const k = THREE.MathUtils.smootherstep(t / GLIDE, 0, 1);
+        let dAz = b.az - a.az;
+        dAz = ((dAz + Math.PI) % TAU + TAU) % TAU - Math.PI; // the short way round
+        // Rise a little mid-glide so a swing past the rider clears them.
+        const lift = Math.sin(k * Math.PI) * 1.5;
+        return { az: a.az + dAz * k, back: THREE.MathUtils.lerp(a.back, b.back, k), up: THREE.MathUtils.lerp(a.up, b.up, k) + lift, ahead: THREE.MathUtils.lerp(a.ahead, b.ahead, k), lookH: THREE.MathUtils.lerp(a.lookH, b.lookH, k) };
+      }
+      t -= GLIDE;
+    }
+    return chase;
+  }
   private lookOff: THREE.Vector3 | null = null;
   private t = 0;
   private quality: Quality;
@@ -1314,10 +1349,14 @@ export class RoadView {
     this.rider.update(dt, mps, crank, clamp((f.grade - 0.05) / 0.05, 0, 1) * Math.min(1, f.kmh / 8));
 
     const fwd = V3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)), right = V3(-fwd.z, 0, fwd.x), portrait = this.cam.aspect < 1.1, sp = Math.min(1.4, mps / 9);
-    const want = rp.clone().addScaledVector(fwd, -(portrait ? 4.4 : 5.2) - sp * 0.6).addScaledVector(right, portrait ? 0.8 : 1.2);
-    want.y = rp.y + (portrait ? 2.3 : 1.95) + Math.sin(this.t * 0.4) * 0.05;
-    const lookW = rp.clone().addScaledVector(fwd, 9);
-    lookW.y = onPath(m + 9).p.y + 1.05;
+    // Chase view (the usual road view): behind and a little to the right, looking up the road.
+    const chase = { az: Math.atan2(portrait ? 0.8 : 1.2, -(portrait ? 4.4 : 5.2) - sp * 0.6), back: Math.hypot(portrait ? 0.8 : 1.2, (portrait ? 4.4 : 5.2) + sp * 0.6), up: portrait ? 2.3 : 1.95, ahead: 9, lookH: 1.05 };
+    const shot = this.deps.settings().cinematic ? this.director(dt, chase) : chase;
+    // Camera on a circle around the rider: az is the angle from straight ahead toward the right.
+    const want = rp.clone().addScaledVector(fwd, Math.cos(shot.az) * shot.back).addScaledVector(right, Math.sin(shot.az) * shot.back);
+    want.y = rp.y + shot.up + Math.sin(this.t * 0.4) * 0.05;
+    const lookW = rp.clone().addScaledVector(fwd, shot.ahead);
+    lookW.y = THREE.MathUtils.lerp(rp.y, onPath(m + 9).p.y, Math.min(1, Math.max(0, shot.ahead / 9))) + shot.lookH;
     this.t += dt;
     const offW = want.clone().sub(rp), lookOffW = lookW.clone().sub(rp);
     if (!this.camOff || !isFinite(this.camOff.x + this.camOff.y + this.camOff.z)) { this.camOff = offW.clone(); this.lookOff = lookOffW.clone(); }

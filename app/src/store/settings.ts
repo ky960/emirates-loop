@@ -20,6 +20,8 @@ export interface Settings {
   terrain: boolean;
   sound: boolean;
   traffic: boolean;
+  /** Road view tours the rider: chase, aerial, side and front shots, gliding between them. */
+  cinematic: boolean;
   showPower: boolean;
   quality: Quality;
   camera: Camera;
@@ -43,6 +45,7 @@ export const DEFAULTS: Settings = {
   terrain: true,
   sound: true,
   traffic: true,
+  cinematic: true,
   showPower: false,
   quality: "balanced",
   camera: "road",

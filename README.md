@@ -10,6 +10,7 @@ Built for one rider on a Samsung Galaxy Tab S7+ in Chrome, with a CYCPLUS speed/
 - **Real gradients:** elevation comes from the open terrain model (or the GPX file). With "Climbs slow you down" on, your sensor speed counts as flat-road effort and the route's gradient changes your virtual speed.
 - **3D road view:** the road follows the real elevation. Detailed 3D models for the rider, date palms and traffic (Camry, Patrol). Landmarks at their real places (Burj Khalifa, Burj Al Arab, Sheikh Zayed Grand Mosque), dhows on the water and camels in the desert. City streets have people walking, waving UAE flags, bougainvillea in the median, zebra crossings and bus shelters. Real buildings, parks and water come from OpenStreetMap. Desert, city, oasis and Hajar mountain scenery, green distance signs in English and Arabic, and a rider whose legs follow your cadence (estimated from speed when only a speed sensor is connected).
 - **Choose your ride:** when the app opens, continue where your last saved ride ended or start any of the six stages from its beginning (also under *Stages* on the Ride tab), so the 617 km loop is ridden over many sessions. Every ride begins in a roadside car park and rolls out onto the road.
+- **Cinematic camera:** the road view glides from the chase view to an aerial, a side and a front view of you, then back (Settings → Display).
 - **Ghost:** replays your best ride second by second.
 - **Trustworthy data:**
   - Ride time comes from the clock, not the screen's frame rate, and distance from the sensor.

@@ -68,6 +68,7 @@ export function renderSettings(el: HTMLElement, ctx: AppCtx) {
       <h2>Display</h2>
       <div class="field"><span class="flabel">Graphics</span>${seg("quality", [["battery", "Battery"], ["balanced", "Balanced"], ["max", "Max"]])}
         <small>Battery: 30 fps, no shadows — coolest for long rides. Balanced: 60 fps. Max: full detail at the screen's refresh rate.</small></div>
+      ${sw("cinematic", "Cinematic camera", "The road view glides from the usual chase view to an aerial, a side and a front view of you, then back, every couple of minutes.")}
       ${sw("terrain", "3D terrain on the map", "Hills and mountains on the map views.")}
       <div class="field"><span class="flabel">Full screen</span><button class="btn sm ghost" data-a="fs">Go full screen</button><small>Or add the app to your home screen from Chrome's menu — it then always opens full screen.</small></div>
     </div>

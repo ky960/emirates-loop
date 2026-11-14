@@ -99,13 +99,14 @@ export class RevCounter {
   }
 
   /**
-   * Rate at wall-clock time `now`: once the next revolution is overdue, the wheel (or crank) can be turning at
-   * most one revolution per time elapsed, so the rate falls away as soon as it stops instead of holding.
+   * Rate at wall-clock time `now`. Sensors report about once a second, so a revolution counts as overdue only after
+   * two seconds without one (or 1.5 revolution periods at very low speed); from then the wheel (or crank) can be
+   * turning at most one revolution per second of silence beyond the first, so the rate falls away once it stops.
    */
   rateAt(now: number): number {
     if (!this.lastEvent || this.rate <= 0) return 0;
     const el = (now - this.lastEvent) / 1000;
-    return el > 1.5 / this.rate ? Math.min(this.rate, 1 / el) : this.rate;
+    return el > Math.max(2, 1.5 / this.rate) ? Math.min(this.rate, 1 / (el - 1)) : this.rate;
   }
 
   reset() { this.revs = this.time = null; this.rate = 0; this.lastEvent = 0; }
