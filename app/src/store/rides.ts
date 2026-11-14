@@ -65,9 +65,13 @@ export function resumeOf(rides: RideRecord[], routeId: string): number {
 
 // ---- chosen start (a stage picked in "Choose your ride") ----
 const START_KEY = "el3.startAt";
-export interface StartAt { routeId: string; m: number }
+/**
+ * A picked stage (by index, and which lap of a loop), not a distance: on a first visit the rough offline route can be
+ * replaced by the detailed road route moments later, and the stage's start moves with it.
+ */
+export interface StartAt { routeId: string; leg: number; lap: number }
 export function loadStartAt(): StartAt | null {
-  try { const v = JSON.parse(localStorage.getItem(START_KEY) || "null"); return v && typeof v.m === "number" && typeof v.routeId === "string" ? v : null; } catch { return null; }
+  try { const v = JSON.parse(localStorage.getItem(START_KEY) || "null"); return v && typeof v.leg === "number" && typeof v.routeId === "string" ? { lap: 0, ...v } : null; } catch { return null; }
 }
 export function saveStartAt(v: StartAt | null) {
   try { if (v) localStorage.setItem(START_KEY, JSON.stringify(v)); else localStorage.removeItem(START_KEY); } catch { /* storage unavailable */ }

@@ -80,16 +80,16 @@ const ctx: AppCtx = {
 // ===================== where the next ride starts =====================
 /** "Continue" (the end of your last saved ride), or the start of a stage you picked in "Choose your ride". */
 function nextStart(): number {
-  const pick = loadStartAt();
-  return pick && sameRoute(pick.routeId, route.id) ? pick.m : resumeOf(rides, route.id);
+  const pick = loadStartAt(), leg = pick && sameRoute(pick.routeId, route.id) ? route.legs[pick.leg] : undefined;
+  return leg ? pick!.lap * route.total + leg.m0 : resumeOf(rides, route.id);
 }
 
 /** "Choose your ride": continue where you left off, or start any stage of the journey from its beginning. */
 async function chooseStart() {
-  if (engine.active) return;
+  if (engine.active || !$("sheet").hidden) return; // a ride is on, or another question is showing
   const cont = resumeOf(rides, route.id), lapBase = route.loop ? Math.floor(cont / route.total) * route.total : 0;
   const lapPos = cont - lapBase, here = legAt(route, cont), pick = loadStartAt();
-  const picked = pick && sameRoute(pick.routeId, route.id) ? route.legs.findIndex((l) => Math.abs(lapBase + l.m0 - pick.m) < 1) : -1;
+  const picked = pick && sameRoute(pick.routeId, route.id) ? pick.leg : -1;
   const km = (m: number) => (m / 1000).toFixed(1);
   const climb = (l: (typeof route.legs)[number]) => (profile.source !== "flat" ? ` · ↑ ${Math.round(climbBetween(profile, route.total, l.m0, l.m1))} m` : "");
   const act = await sheet(html`
@@ -111,7 +111,7 @@ async function chooseStart() {
     toast(cont > 0 ? `Continuing ${here.from} → ${here.to}` : `Starting ${route.legs[0].from} → ${route.legs[0].to}`);
   } else if (act?.startsWith("stage:")) {
     const l = route.legs[+act.slice(6)];
-    saveStartAt({ routeId: route.id, m: lapBase + l.m0 });
+    saveStartAt({ routeId: route.id, leg: +act.slice(6), lap: route.loop ? Math.round(lapBase / route.total) : 0 });
     toast(`Next ride starts at the beginning of ${l.from} → ${l.to}`);
   }
 }
@@ -327,8 +327,12 @@ engine.on("arrival", (st) => {
 async function keepAwake() {
   try { if ("wakeLock" in navigator && !wake) { wake = await navigator.wakeLock.request("screen"); wake.addEventListener("release", () => (wake = null)); } } catch { /* ignore */ }
 }
+let hiddenAt = 0;
 document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") hiddenAt = Date.now();
   if (document.visibilityState === "visible" && engine.active) keepAwake();
+  // An installed app is usually resumed rather than restarted: after a break, ask where to ride again.
+  if (document.visibilityState === "visible" && !engine.active && hiddenAt && Date.now() - hiddenAt > 10 * 60_000) chooseStart();
   engine.update();
 });
 
@@ -455,9 +459,14 @@ async function boot() {
   persistStorage();
   renderPills();
   renderControls();
+  // Installable app + offline cache: register first so a new version arrives (and reloads) before you've chosen anything.
+  if ("serviceWorker" in navigator && import.meta.env.PROD) {
+    import("virtual:pwa-register").then(({ registerSW }) => registerSW({ immediate: true })).catch(() => {});
+  }
   try { await ctx.reloadRides(); } catch (e) { console.error(e); }
   route = chooseRoute();
   profile = await loadProfile(route);
+  openingQuestions(); // straight away, not after the map has loaded
   $("loadingTxt").textContent = "Loading the map…";
   try {
     await mapView.init(route);
@@ -481,6 +490,10 @@ async function boot() {
   hub.restore(settings.sensors.map((s) => s.id));
   if (!hub.supported) toast("This browser has no Bluetooth. Use Chrome on Android to connect sensors.", 6000);
 
+}
+
+/** On opening: offer to finish an interrupted ride, otherwise ask where to ride. Runs while the map loads behind. */
+async function openingQuestions() {
   // Unfinished ride from a reload or crash?
   try {
     const cp = await db.get<{ v: number; acc: { dist: number; timer: number; startWall: number; sim: boolean }; routeId: string; savedAt: number }>("active");
@@ -500,11 +513,6 @@ async function boot() {
   } catch { /* ignore */ }
   // Ask where to ride, unless an unfinished ride was just restored.
   if (!engine.active) await chooseStart();
-
-  // Installable app + offline cache
-  if ("serviceWorker" in navigator && import.meta.env.PROD) {
-    import("virtual:pwa-register").then(({ registerSW }) => registerSW({ immediate: true })).catch(() => {});
-  }
 }
 
 boot();
