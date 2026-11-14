@@ -68,8 +68,9 @@ describe("FTMS indoor bike", () => {
     c.push(100, 0, 0);
     c.push(104, 1024, 1000); // 4 rev/s
     expect(c.rateAt(1100)).toBeCloseTo(4);
-    expect(c.rateAt(1300)).toBeCloseTo(4); // next revolution not overdue yet
-    expect(c.rateAt(2000)).toBeCloseTo(1); // 1 s with no revolution: at most 1 rev/s
-    expect(c.rateAt(3000)).toBeCloseTo(0.5);
+    expect(c.rateAt(2000)).toBeCloseTo(4); // sensors report ~once a second: not overdue yet
+    expect(c.rateAt(3000)).toBeCloseTo(4);
+    expect(c.rateAt(3500)).toBeCloseTo(1 / 1.5); // 2.5 s with no revolution: falling away
+    expect(c.rateAt(5000)).toBeCloseTo(1 / 3);
   });
 });
