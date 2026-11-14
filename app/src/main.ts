@@ -5,6 +5,7 @@ import { RideEngine, type Frame, type RideState } from "./ride/engine";
 import { Ghost, pickBest } from "./ride/ghost";
 import { Pack } from "./ride/pack";
 import { ChallengeRunner, fmtSecs, localChallengeStore, planChallenges, type Challenge } from "./ride/challenges";
+import { badges, newlyEarned, type Badge } from "./ride/badges";
 import { ZONE_COLORS, ZONE_NAMES } from "./ride/metrics";
 import type { RideRecord } from "./ride/types";
 import { avgKmh } from "./ride/types";
@@ -45,8 +46,17 @@ const challenges = () => {
 };
 const runner = new ChallengeRunner(challenges, () => route, {
   best: challengeStore.best,
-  record: (id, kind, t) => { if (!engine.current.sim) challengeStore.record(id, kind, t); },
+  record: (id, kind, t) => { if (!engine.current.sim) { challengeStore.record(id, kind, t); setTimeout(checkBadges, 6500); } },
 });
+
+// Badges: announce any newly earned (after a saved ride or a completed challenge), one banner at a time.
+let knownBadges: Badge[] | null = null;
+function checkBadges() {
+  const now = badges(rides, route, challengeStore.log());
+  const fresh = knownBadges ? newlyEarned(knownBadges, now) : [];
+  knownBadges = now;
+  fresh.forEach((b, i) => setTimeout(() => { showBanner("Badge earned", `${b.icon} ${b.title}`, b.desc, 5000); audio.chime(); }, i * 5500));
+}
 const engine = new RideEngine({
   input: hub,
   route: () => route,
@@ -175,6 +185,7 @@ async function selectRoute(force = false) {
   if (engine.active) { pendingRoute = next; return; }
   route = next;
   profile = await loadProfile(route);
+  knownBadges = badges(rides, route, challengeStore.log()); // stage ends moved with the route: re-baseline quietly
   mapView.setRoute(route);
   fetchElevation(route);
   setCam(camMode);
@@ -301,6 +312,7 @@ async function askFinish() {
       saveStartAt(null); // "Continue" now picks up where this ride ended
       await db.unset("active").catch(() => {});
       await ctx.reloadRides();
+      setTimeout(checkBadges, 4500);
       const pr = rec.moving >= 600 && (!prevBest || avgKmh(rec) > avgKmh(prevBest));
       toast(pr ? `Saved · new best average ${avgKmh(rec).toFixed(1)} km/h` : `Saved ${(rec.dist / 1000).toFixed(2)} km`, 4000);
     }
@@ -534,6 +546,7 @@ async function boot() {
   try { await ctx.reloadRides(); } catch (e) { console.error(e); }
   route = chooseRoute();
   profile = await loadProfile(route);
+  checkBadges(); // what you've already earned, so only new ones are announced
   openingQuestions(); // straight away, not after the map has loaded
   $("loadingTxt").textContent = "Loading the map…";
   try {
