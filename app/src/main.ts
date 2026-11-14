@@ -9,7 +9,7 @@ import { avgKmh } from "./ride/types";
 import { buildApproxLoop, buildGpxRoute, buildStreetLoop, cachedStreet, fetchStreet, legAt, nextStop, wrapM, type Route } from "./route";
 import { SensorHub, type SimMode } from "./sensors/hub";
 import { db, persistStorage } from "./store/db";
-import { loadRides, progressOf, saveRide } from "./store/rides";
+import { loadRides, loadStartAt, resumeOf, sameRoute, saveRide, saveStartAt } from "./store/rides";
 import { loadSettings, maxHrOf, saveSettings, type Camera } from "./store/settings";
 import { drawStageProfile } from "./ui/charts";
 import { $, html, raw, sheet, toast } from "./ui/dom";
@@ -36,7 +36,7 @@ const engine = new RideEngine({
   route: () => route,
   profile: () => profile,
   settings: () => settings,
-  basePos: () => progressOf(rides, route.id) + DEV_KM * 1000,
+  basePos: () => nextStart() + DEV_KM * 1000,
   ghost: () => ghost,
 });
 const osm = new OsmTiles(14);
@@ -76,6 +76,45 @@ const ctx: AppCtx = {
     version: VERSION,
   }),
 };
+
+// ===================== where the next ride starts =====================
+/** "Continue" (the end of your last saved ride), or the start of a stage you picked in "Choose your ride". */
+function nextStart(): number {
+  const pick = loadStartAt();
+  return pick && sameRoute(pick.routeId, route.id) ? pick.m : resumeOf(rides, route.id);
+}
+
+/** "Choose your ride": continue where you left off, or start any stage of the journey from its beginning. */
+async function chooseStart() {
+  if (engine.active) return;
+  const cont = resumeOf(rides, route.id), lapBase = route.loop ? Math.floor(cont / route.total) * route.total : 0;
+  const lapPos = cont - lapBase, here = legAt(route, cont), pick = loadStartAt();
+  const picked = pick && sameRoute(pick.routeId, route.id) ? route.legs.findIndex((l) => Math.abs(lapBase + l.m0 - pick.m) < 1) : -1;
+  const km = (m: number) => (m / 1000).toFixed(1);
+  const climb = (l: (typeof route.legs)[number]) => (profile.source !== "flat" ? ` · ↑ ${Math.round(climbBetween(profile, route.total, l.m0, l.m1))} m` : "");
+  const act = await sheet(html`
+    <h2>Choose your ride</h2>
+    <p class="muted">${route.name} · ${km(route.total)} km in ${route.legs.length} stage${route.legs.length > 1 ? "s" : ""}${route.loop && cont >= route.total ? ` · lap ${Math.floor(cont / route.total) + 1}` : ""}</p>
+    <button class="btn primary continue" data-act="continue">
+      <span>${cont > 0 ? "Continue" : "Start the journey"}</span>
+      <small>${cont > 0 ? `${here.from} → ${here.to} · ${km(cont - lapBase - here.m0)} of ${km(here.m1 - here.m0)} km` : `${route.legs[0].from} → ${route.legs[0].to}`}</small>
+    </button>
+    <div class="legs stages">${route.legs.map((l, i) => {
+      const f = Math.min(1, Math.max(0, (lapPos - l.m0) / (l.m1 - l.m0))), cls = f >= 1 ? "done" : f > 0 ? "here" : "";
+      return html`<div class="leg ${cls}${i === picked ? " picked" : ""}"><span class="dot"></span>
+        <div style="min-width:0"><b>Stage ${i + 1} · ${l.from} → ${l.to}</b><span class="sub">${km(l.m1 - l.m0)} km${climb(l)}</span><div class="bar"><div style="width:${(f * 100).toFixed(1)}%"></div></div></div>
+        <button class="btn sm ${i === picked ? "primary" : "ghost"}" data-act="stage:${i}">${i === picked ? "Chosen" : "Start here"}</button></div>`;
+    })}</div>
+    <p class="muted" style="font-size:14px">Rides always count toward your history. After a ride you saved, "Continue" picks up where it ended.</p>`);
+  if (act === "continue") {
+    saveStartAt(null);
+    toast(cont > 0 ? `Continuing ${here.from} → ${here.to}` : `Starting ${route.legs[0].from} → ${route.legs[0].to}`);
+  } else if (act?.startsWith("stage:")) {
+    const l = route.legs[+act.slice(6)];
+    saveStartAt({ routeId: route.id, m: lapBase + l.m0 });
+    toast(`Next ride starts at the beginning of ${l.from} → ${l.to}`);
+  }
+}
 
 // ===================== route & elevation =====================
 function chooseRoute(): Route {
@@ -182,11 +221,12 @@ function renderControls() {
   const c = $("controls"), st = engine.state, any = hub.hasAnySource();
   let h;
   if (st === "idle") {
+    const stages = html`<button class="btn ghost" data-c="stages">Stages</button>`;
     h = any
-      ? html`<button class="btn primary" data-c="start">Start ride</button><button class="btn ghost" data-c="add">Add sensor</button>`
+      ? html`<button class="btn primary" data-c="start">Start ride</button><button class="btn ghost" data-c="add">Add sensor</button>${stages}`
       : hub.simulating
-        ? html`<button class="btn primary" data-c="start">Start ride</button>`
-        : html`<button class="btn primary" data-c="add">Connect sensors</button><button class="btn ghost" data-c="sim">Try a simulated ride</button>`;
+        ? html`<button class="btn primary" data-c="start">Start ride</button>${stages}`
+        : html`<button class="btn primary" data-c="add">Connect sensors</button><button class="btn ghost" data-c="sim">Try a simulated ride</button>${stages}`;
   } else if (st === "riding") {
     h = html`<button class="btn" data-c="pause">Pause</button><button class="btn primary" data-c="finish">Finish</button>`;
   } else {
@@ -203,6 +243,7 @@ $("controls").addEventListener("click", (e) => {
   const a = b.dataset.c;
   if (a === "add") addSensor();
   else if (a === "sim") startSim("speed+hr");
+  else if (a === "stages") chooseStart();
   else if (a === "start") engine.start();
   else if (a === "pause") engine.pause();
   else if (a === "resume") engine.resume();
@@ -239,6 +280,7 @@ async function askFinish() {
     if (rec) {
       const prevBest = pickBest(rides, rec.gradientEffect);
       await saveRide(rec);
+      saveStartAt(null); // "Continue" now picks up where this ride ended
       await db.unset("active").catch(() => {});
       await ctx.reloadRides();
       const pr = rec.moving >= 600 && (!prevBest || avgKmh(rec) > avgKmh(prevBest));
@@ -456,6 +498,8 @@ async function boot() {
       }
     } else if (cp) await db.unset("active");
   } catch { /* ignore */ }
+  // Ask where to ride, unless an unfinished ride was just restored.
+  if (!engine.active) await chooseStart();
 
   // Installable app + offline cache
   if ("serviceWorker" in navigator && import.meta.env.PROD) {

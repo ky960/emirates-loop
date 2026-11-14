@@ -12,9 +12,9 @@ import { makeWalkers, type Walker } from "./people";
 
 /** One piece of a model, baked into model space (metres, ground at y = 0, facing -Z). */
 export interface Part { geo: THREE.BufferGeometry; mat: THREE.Material; paint?: boolean; shadow?: boolean }
-export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; walkers: Walker[] }
+export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; walkers: Walker[]; dhow?: Part[]; camel?: Part[] }
 
-const FILES = { palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb" };
+const FILES = { palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
 /** Pedestrians (RenderPeople, CC BY 4.0); the first one carries the walk cycle. */
 const PEOPLE = ["ped_nathan.glb", "ped_eric.glb", "ped_claudia.glb"];
 
@@ -72,6 +72,14 @@ function fit(root: THREE.Object3D, len: number) {
   return new THREE.Matrix4().makeRotationY(Math.PI).multiply(new THREE.Matrix4().makeScale(s, s, s)).multiply(new THREE.Matrix4().makeTranslation(-c.x, -bb.min.y, -c.z));
 }
 
+/** Like fit, but scaled to a height. */
+function fitHeight(root: THREE.Object3D, h: number) {
+  root.updateMatrixWorld(true);
+  const bb = new THREE.Box3().setFromObject(root), size = bb.getSize(new THREE.Vector3()), c = bb.getCenter(new THREE.Vector3());
+  const s = h / size.y;
+  return new THREE.Matrix4().makeRotationY(Math.PI).multiply(new THREE.Matrix4().makeScale(s, s, s)).multiply(new THREE.Matrix4().makeTranslation(-c.x, -bb.min.y, -c.z));
+}
+
 function tuneStd(mat: THREE.Material, f: (m: THREE.MeshStandardMaterial) => void) {
   if ((mat as THREE.MeshStandardMaterial).isMeshStandardMaterial) f(mat as THREE.MeshStandardMaterial);
 }
@@ -80,8 +88,11 @@ export async function loadModels(base: string): Promise<Models> {
   const L = new GLTFLoader();
   L.setMeshoptDecoder(MeshoptDecoder);
   const get = (f: string) => L.loadAsync(base + "models/" + f).catch((e) => { console.warn("model failed to load", f, e); return null; });
-  const [palm, camry, patrol, cyclist, ...people] = await Promise.all([get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), ...PEOPLE.map(get)]);
+  const [palm, camry, patrol, cyclist, dhow, camel, ...people] = await Promise.all([get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), get(FILES.dhow), get(FILES.camel), ...PEOPLE.map(get)]);
   const out: Models = { palmHeight: 7.34, cars: [], walkers: [] };
+  // Traditional dhow (~16 m) for the water near the road, and camels (~2.1 m) for the desert.
+  if (dhow) { out.dhow = bake(dhow.scene, fit(dhow.scene, 16)); out.dhow.forEach((p) => (p.shadow = true)); }
+  if (camel) { out.camel = bake(camel.scene, fitHeight(camel.scene, 2.1)); out.camel.forEach((p) => (p.shadow = true)); }
   try { out.walkers = makeWalkers(people.filter((g): g is GLTF => !!g)); } catch (e) { console.warn("pedestrians unavailable", e); }
 
   if (palm) {
@@ -123,4 +134,74 @@ export async function loadModels(base: string): Promise<Models> {
 
   if (cyclist) out.cyclist = cyclist;
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// UAE landmarks at their real positions and sizes (Sketchfab, CC BY 4.0), downloaded only when the ride comes
+// near one. Any OpenStreetMap building standing on the same spot is left out so the two don't overlap.
+
+export interface Landmark {
+  id: string; name: string; file: string;
+  /** Position (lng, lat). */
+  at: [number, number];
+  /** Scale to this height (m), or this longest horizontal side (m). */
+  height?: number; length?: number;
+  /** Turn (degrees, clockwise seen from above), or "osm" to line up with the matching OpenStreetMap footprint. */
+  turn: number | "osm";
+  /** Leave out OpenStreetMap buildings within this radius (m). */
+  clear: number;
+}
+
+export const LANDMARKS: Landmark[] = [
+  { id: "burj_khalifa", name: "Burj Khalifa", file: "lm_burj_khalifa.glb", at: [55.2744, 25.1972], height: 828, turn: 0, clear: 90 },
+  { id: "burj_al_arab", name: "Burj Al Arab", file: "lm_burj_al_arab.glb", at: [55.1853, 25.1412], height: 321, turn: -45, clear: 80 },
+  { id: "zayed_mosque", name: "Sheikh Zayed Grand Mosque", file: "lm_zayed_mosque.glb", at: [54.4749, 24.4129], length: 420, turn: "osm", clear: 260 },
+];
+
+const lmCache = new Map<string, Promise<THREE.Object3D | null>>();
+
+/** Landmark model scaled to real size, centred on its footprint, standing on y = 0, ready to place. */
+export function loadLandmark(base: string, lm: Landmark): Promise<THREE.Object3D | null> {
+  let p = lmCache.get(lm.id);
+  if (!p) {
+    const L = new GLTFLoader();
+    L.setMeshoptDecoder(MeshoptDecoder);
+    p = L.loadAsync(base + "models/" + lm.file).then((g) => {
+      const root = g.scene;
+      root.updateMatrixWorld(true);
+      const bb = new THREE.Box3().setFromObject(root), size = bb.getSize(new THREE.Vector3()), c = bb.getCenter(new THREE.Vector3());
+      const s = lm.height ? lm.height / size.y : (lm.length ?? 100) / Math.max(size.x, size.z);
+      const inner = new THREE.Group();
+      inner.add(root);
+      root.position.set(-c.x, -bb.min.y, -c.z);
+      inner.scale.setScalar(s);
+      // Seen from kilometres away, so let them show through the haze more than nearby scenery does.
+      root.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        m.castShadow = false; m.receiveShadow = false; m.frustumCulled = false;
+        const mats = (Array.isArray(m.material) ? m.material : [m.material]).map((x) => {
+          const mm = x.clone();
+          mm.onBeforeCompile = (sh) => {
+            sh.fragmentShader = sh.fragmentShader.replace("#include <fog_fragment>", `#ifdef USE_FOG
+  #ifdef FOG_EXP2
+    float fogFactor = 1.0 - exp( - fogDensity * fogDensity * 0.15 * vFogDepth * vFogDepth );
+  #else
+    float fogFactor = smoothstep( fogNear, fogFar, vFogDepth );
+  #endif
+  gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );
+#endif`);
+          };
+          return mm;
+        });
+        m.material = Array.isArray(m.material) ? mats : mats[0];
+      });
+      const out = new THREE.Group();
+      out.add(inner);
+      out.userData.longSideAlongX = size.x >= size.z;
+      return out as THREE.Object3D;
+    }).catch((e) => { console.warn("landmark failed to load", lm.file, e); return null; });
+    lmCache.set(lm.id, p);
+  }
+  return p;
 }
