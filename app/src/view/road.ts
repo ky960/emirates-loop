@@ -11,7 +11,7 @@ import type { Quality, Settings } from "../store/settings";
 import { clamp, D2R, hash01, rng, smoothstep, TAU } from "../util";
 import type { OsmData, OsmTiles } from "./osm";
 import { carGeometry, ghafGeometry, JERSEY, palmCrownGeometry, palmTrunkGeometry, sweep, WBEAM } from "./props";
-import { loadModels, type Models, type Part } from "./models";
+import { LANDMARKS, loadLandmark, loadModels, type Landmark, type Models, type Part } from "./models";
 import { Pedestrians } from "./people";
 import { buildModelRider, buildRider, type RiderModel } from "./rider";
 import { uaeFlagTexture } from "./textures";
@@ -374,6 +374,8 @@ function makeShared() {
 }
 /** Loaded 3D models (null until they arrive); their geometries are shared across windows. */
 let MODELS: Models | null = null;
+/** Landmark models that have finished loading, by id. */
+const LM_READY = new Map<string, THREE.Object3D>();
 const SHARED_GEOS = () => {
   const s = new Set(Object.values(GEO));
   MODELS?.palm?.forEach((p) => s.add(p.geo));
@@ -716,7 +718,10 @@ export class RoadView {
     yield;
 
     let scen: ReturnType<RoadView["scenery"]> | null = null;
-    if (ctx.data) { try { scen = this.scenery(ctx.data, toL, near, C, zone, q, inLot); } catch (e) { console.error(e); } }
+    // UAE landmarks within 14 km: placed at their real position; OpenStreetMap blocks on their footprint are left out.
+    const midC = C[ci(1000)], lms = LANDMARKS.map((lm) => ({ lm, p: toL(lm.at) })).filter(({ p }) => Math.hypot(p.x - midC.x, p.z - midC.z) < 14000);
+    const onLandmark = (x: number, z: number, r = 0) => lms.some(({ lm, p }) => Math.hypot(x - p.x, z - p.z) < lm.clear + r);
+    if (ctx.data) { try { scen = this.scenery(ctx.data, toL, near, C, zone, q, inLot, lms, onLandmark); } catch (e) { console.error(e); } }
     const urban = !!scen && scen.buildings >= 40;
     const mountainous = zone === "mountains";
     let hb: Biome, cb: Biome, pb: Biome;
@@ -809,6 +814,7 @@ export class RoadView {
       const seen = new Set<string>(), sky: Bld[] = [];
       for (const b of far.data.b) {
         if (b.h < 40) continue;
+        { const v0 = toL(b.rings[0][0]); if (onLandmark(v0.x, v0.z, 40)) continue; }
         const v = toL(b.rings[0][0]), nr = near.query(v.x, v.z);
         if (nr.d < (b.h > 60 ? 1600 : 650) || nr.d > 4500) continue;
         const k = Math.round(v.x / 4) + "," + Math.round(v.z / 4);
@@ -822,7 +828,7 @@ export class RoadView {
     yield;
 
     // Props, placed by route distance so they don't jump when the window is rebuilt.
-    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], flag: [], flower: [], zebra: [], shelter: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
+    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], camel: [], flag: [], flower: [], zebra: [], shelter: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
     // Scenery off the road must clear the opposite carriageway on the left.
     const off = (sd: number, base: number) => (sd > 0 ? base : -(base + (city ? 14 : 9)));
     const each = (spacing: number, fn: (d: number, r: () => number) => void) => {
@@ -931,6 +937,16 @@ export class RoadView {
         }
       });
       each(5, (d, r) => { if (r() < 0.5) { const sd = r() > 0.5 ? 1 : -1, lat = off(sd, 8.5 + 70 * Math.pow(r(), 1.2)), { a, pt } = place(d, lat); if (!inLot(pt.x, pt.z, 2) && clear(pt, 8, a.i)) { const s = 0.25 + r() * 0.45; it.shrub.push({ x: pt.x, y: hAt(pt, lat) + s * 0.3, z: pt.z, sx: s, sy: s * 0.6, sz: s, ry: r() * TAU }); } } });
+      // Now and then a few camels grazing out in the desert.
+      each(1100, (d, r) => {
+        if (r() < 0.45) return;
+        const sd = r() > 0.5 ? 1 : -1, lat0 = off(sd, 35 + 140 * r()), n = 2 + Math.floor(r() * 3), hd = r() * TAU;
+        for (let k = 0; k < n; k++) {
+          const lat = lat0 + (r() - 0.5) * 14, { a, pt } = place(d + (r() - 0.5) * 16, lat);
+          if (inLot(pt.x, pt.z, 6) || !clear(pt, 25, a.i)) continue;
+          it.camel.push({ x: pt.x, y: hAt(pt, lat) - 0.05, z: pt.z, ry: hd + (r() - 0.5) * 1.6, s: 0.9 + r() * 0.2 });
+        }
+      });
     } else {
       // Mountains: rocks half-buried in the slope so they sit on the ground rather than float.
       each(5, (d, r) => {
@@ -1035,6 +1051,21 @@ export class RoadView {
     const palmLod = palms.length ? new PalmLod(palms, MODELS?.palm ? q.palmNear : 0, group) : null;
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
     add(inst(GEO.rock, MAT.rock, it.rock));
+    MODELS?.camel?.forEach((p) => add(inst(p.geo, p.mat, it.camel, !!p.shadow)));
+    if (scen?.dhows.length) MODELS?.dhow?.forEach((p) => add(inst(p.geo, p.mat, scen!.dhows, !!p.shadow)));
+    for (const { lm, p } of lms) {
+      const obj = LM_READY.get(lm.id);
+      if (!obj) { loadLandmark(import.meta.env.BASE_URL, lm).then((o) => { if (o && !LM_READY.has(lm.id)) { LM_READY.set(lm.id, o); this.landmarkArrived(); } }); continue; }
+      const o = obj.clone();
+      o.traverse((x) => (x.userData.shared = true));
+      o.position.set(p.x, C[near.query(p.x, p.z).i].y - 0.4, p.z);
+      const axis = scen?.lmAxis.get(lm.id);
+      if (lm.turn === "osm") {
+        // Long side of the model along the footprint's main axis (axis is in scene x, z).
+        if (axis) o.rotation.y = obj.userData.longSideAlongX ? Math.atan2(-axis.y, axis.x) : Math.atan2(axis.x, axis.y);
+      } else o.rotation.y = -lm.turn * D2R;
+      add(o);
+    }
     add(inst(GEO.flag, MAT.flag, it.flag)); add(inst(GEO.flower, MAT.flower, it.flower, false)); add(inst(GEO.zebra, MAT.white, it.zebra, false));
     add(inst(GEO.shelterRoof, MAT.shelter, it.shelter)); add(inst(GEO.shelterFrame, MAT.shelter, it.shelter)); add(inst(GEO.shelterGlass, MAT.glass, it.shelter, false));
     yield;
@@ -1095,12 +1126,20 @@ export class RoadView {
     }
   }
 
+  /** A landmark model finished downloading: rebuild the current window so it appears. */
+  private landmarkArrived() {
+    if (this.win && !this.building) this.building = { gen: this.buildWindow(this.win.m0), m0: this.win.m0 };
+    else this.lmPending = true; // a build already under way started without it: rebuild once that one is in
+  }
+  private lmPending = false;
+
   private osmArrived(m0: number) {
     // Rebuild the current window once its map data has arrived (incrementally, no hitch).
     if (this.win && this.win.m0 === m0 && this.win.osmState !== "complete" && !this.building) this.building = { gen: this.buildWindow(m0), m0 };
   }
 
-  private scenery(ctx: OsmData, toL: (p: LngLat, y?: number) => THREE.Vector3, near: Nearest, C: THREE.Vector3[], zone: Biome, q: (typeof QUALITY)[Quality], inLot: (x: number, z: number, pad?: number) => boolean) {
+  private scenery(ctx: OsmData, toL: (p: LngLat, y?: number) => THREE.Vector3, near: Nearest, C: THREE.Vector3[], zone: Biome, q: (typeof QUALITY)[Quality], inLot: (x: number, z: number, pad?: number) => boolean,
+    lms: Array<{ lm: Landmark; p: THREE.Vector3 }>, onLandmark: (x: number, z: number, r?: number) => boolean) {
     const yAt = (x: number, z: number) => C[near.query(x, z).i].y;
     const toMap = (p: LngLat) => { const v = toL(p); return new THREE.Vector2(v.x, -v.z); };
     const bbox = (rings: LngLat[][]) => {
@@ -1108,7 +1147,26 @@ export class RoadView {
       for (const p of rings[0]) { const v = toL(p); a = Math.min(a, v.x); b = Math.max(b, v.x); c = Math.min(c, v.z); d = Math.max(d, v.z); }
       return { cx: (a + b) / 2, cz: (c + d) / 2, r: Math.hypot(b - a, d - c) / 2 };
     };
-    const res = { meshes: [] as THREE.Object3D[], buildings: 0, water: false, palms: [] as Array<{ x: number; z: number; s: number }>, roofUnits: [] as Item[] };
+    const res = { meshes: [] as THREE.Object3D[], buildings: 0, water: false, palms: [] as Array<{ x: number; z: number; s: number }>, roofUnits: [] as Item[], dhows: [] as Item[], lmAxis: new Map<string, THREE.Vector2>() };
+    // Landmarks that line up with their OpenStreetMap footprint: main axis of the largest building on the spot.
+    for (const { lm, p } of lms) {
+      if (lm.turn !== "osm") continue;
+      let best: THREE.Vector2[] | null = null, bestA = 0;
+      for (const b of ctx.b) {
+        const bb = bbox(b.rings);
+        if (Math.hypot(bb.cx - p.x, bb.cz - p.z) > lm.clear) continue;
+        const ring = b.rings[0].map((q2) => { const v = toL(q2); return new THREE.Vector2(v.x, v.z); }), area = Math.abs(ringArea(ring));
+        if (area > bestA) { bestA = area; best = ring; }
+      }
+      if (!best) continue;
+      // Principal axis of the outline's vertices.
+      let mx = 0, mz = 0, sxx = 0, szz = 0, sxz = 0;
+      for (const v of best) { mx += v.x; mz += v.y; }
+      mx /= best.length; mz /= best.length;
+      for (const v of best) { const dx = v.x - mx, dz = v.y - mz; sxx += dx * dx; szz += dz * dz; sxz += dx * dz; }
+      const ang = 0.5 * Math.atan2(2 * sxz, sxx - szz);
+      res.lmAxis.set(lm.id, new THREE.Vector2(Math.cos(ang), Math.sin(ang)));
+    }
     // Buildings within 650 m of the road, never on it. Tall ones are kept out to 1.6 km for a skyline.
     const seen = new Set<string>(), blds: Array<OsmData["b"][number] & { y: number }> = [];
     for (const b of ctx.b) {
@@ -1117,7 +1175,7 @@ export class RoadView {
       seen.add(k);
       const nr = near.query(bb.cx, bb.cz);
       const limit = b.h > 60 ? 1600 : 650;
-      if (nr.d > limit || nr.d - bb.r < 12 || inLot(bb.cx, bb.cz, bb.r)) continue;
+      if (nr.d > limit || nr.d - bb.r < 12 || inLot(bb.cx, bb.cz, bb.r) || onLandmark(bb.cx, bb.cz)) continue;
       blds.push({ ...b, y: C[nr.i].y });
       if (blds.length > q.buildings) break;
     }
@@ -1167,6 +1225,25 @@ export class RoadView {
     }).slice(0, 1800);
     const R = roadMeshes(roads, toL, yAt);
     if (R) res.meshes.push(R);
+    // A few dhows on open water near the road.
+    if (MODELS?.dhow) {
+      const rd = rng(91);
+      for (const f of water) {
+        if (res.dhows.length >= 6) break;
+        const ring = f.rings[0].map(toMap);
+        if (ring.length < 3 || Math.abs(ringArea(ring)) < 30000) continue;
+        let a = 1e12, b2 = -1e12, c3 = 1e12, d2 = -1e12;
+        for (const p of ring) { a = Math.min(a, p.x); b2 = Math.max(b2, p.x); c3 = Math.min(c3, p.y); d2 = Math.max(d2, p.y); }
+        for (let k = 0, got = 0; k < 40 && got < 2; k++) {
+          const pt = new THREE.Vector2(a + rd() * (b2 - a), c3 + rd() * (d2 - c3));
+          if (!inside(pt, ring)) continue;
+          const dd = near.query(pt.x, -pt.y).d;
+          if (dd < 60 || dd > 900) continue;
+          res.dhows.push({ x: pt.x, y: yAt(pt.x, -pt.y) + 0.06 - 0.9, z: -pt.y, ry: rd() * TAU });
+          got++;
+        }
+      }
+    }
     return res;
   }
 
@@ -1294,6 +1371,7 @@ export class RoadView {
     this.win = w;
     this.scene.add(w.group);
     this.info = w.label;
+    if (this.lmPending) { this.lmPending = false; this.landmarkArrived(); return; }
     // Map data may have arrived while this window was being built.
     const farDone = !w.farKeys.length || this.deps.osmFar?.get(w.farKeys).state === "complete";
     if (w.osmState !== "complete" && w.osmState !== "none" && this.deps.osm.get(w.keys).state === "complete" && farDone) this.osmArrived(w.m0);
@@ -1307,6 +1385,7 @@ export class RoadView {
     w.group.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if ((o as THREE.InstancedMesh).isInstancedMesh) { (o as THREE.InstancedMesh).dispose(); return; }
+      if (o.userData.shared) return; // landmark models are reused by the next window
       if (mesh.geometry && !shared.has(mesh.geometry)) mesh.geometry.dispose();
       const mat = mesh.material as THREE.Material & { map?: THREE.Texture | null };
       if (mat?.userData?.ownMap) mat.map?.dispose();

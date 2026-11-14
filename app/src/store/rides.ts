@@ -46,12 +46,31 @@ export async function loadRides(): Promise<RideRecord[]> {
 export const saveRide = (r: RideRecord) => db.put("rides", r);
 export const deleteRide = (id: string) => db.del("rides", id);
 
-/** Total distance ridden on the loop — where your next ride starts. */
+const loopish = (id: string) => id === "loop" || id.startsWith("loop-");
+/** Same journey? (The loop's id changes with the road route it was built from.) */
+export const sameRoute = (a: string, b: string) => (loopish(a) ? loopish(b) : a === b);
+
+/** Total distance ridden on this route. */
 export function progressOf(rides: RideRecord[], routeId: string): number {
-  const loopish = (id: string) => id === "loop" || id.startsWith("loop-");
-  return rides
-    .filter((r) => (loopish(routeId) ? loopish(r.routeId) : r.routeId === routeId))
-    .reduce((a, r) => a + r.dist, 0);
+  return rides.filter((r) => sameRoute(routeId, r.routeId)).reduce((a, r) => a + r.dist, 0);
+}
+
+/** Where "Continue" picks up: the end of your most recent saved ride on this route (0 before the first). */
+export function resumeOf(rides: RideRecord[], routeId: string): number {
+  const mine = rides.filter((r) => sameRoute(routeId, r.routeId));
+  if (!mine.length) return 0;
+  const last = mine.reduce((a, r) => (r.start > a.start ? r : a));
+  return last.startM + last.dist;
+}
+
+// ---- chosen start (a stage picked in "Choose your ride") ----
+const START_KEY = "el3.startAt";
+export interface StartAt { routeId: string; m: number }
+export function loadStartAt(): StartAt | null {
+  try { const v = JSON.parse(localStorage.getItem(START_KEY) || "null"); return v && typeof v.m === "number" && typeof v.routeId === "string" ? v : null; } catch { return null; }
+}
+export function saveStartAt(v: StartAt | null) {
+  try { if (v) localStorage.setItem(START_KEY, JSON.stringify(v)); else localStorage.removeItem(START_KEY); } catch { /* storage unavailable */ }
 }
 
 // ---- backup ----

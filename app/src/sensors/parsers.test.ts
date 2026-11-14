@@ -63,4 +63,13 @@ describe("FTMS indoor bike", () => {
     expect(r.rpm).toBe(80);
     expect(r.watts).toBe(200);
   });
+  it("lets the wheel rate fall away once revolutions stop, instead of holding it", () => {
+    const c = new RevCounter(2 ** 32, 200);
+    c.push(100, 0, 0);
+    c.push(104, 1024, 1000); // 4 rev/s
+    expect(c.rateAt(1100)).toBeCloseTo(4);
+    expect(c.rateAt(1300)).toBeCloseTo(4); // next revolution not overdue yet
+    expect(c.rateAt(2000)).toBeCloseTo(1); // 1 s with no revolution: at most 1 rev/s
+    expect(c.rateAt(3000)).toBeCloseTo(0.5);
+  });
 });

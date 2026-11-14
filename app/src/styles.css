@@ -237,3 +237,10 @@ body.sim .stage { height: calc(100dvh - 258px) }
 .sheet p { margin: 0 }
 .sheet .acts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px }
 .toast { position: fixed; left: 50%; top: calc(16px + env(safe-area-inset-top)); transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 12px 18px; border-radius: 12px; font-weight: 600; z-index: 40; max-width: calc(100% - 32px); box-shadow: 0 8px 24px rgba(0, 0, 0, .3) }
+
+/* ---------- choose your ride ---------- */
+.btn.continue { display: grid; justify-items: start; gap: 2px; text-align: left; padding: 14px 18px }
+.btn.continue small { font: 500 15px var(--body); letter-spacing: 0; text-transform: none; opacity: .85 }
+.stages .leg { grid-template-columns: 18px minmax(0, 1fr) auto }
+.stages .leg .sub { display: block; color: var(--muted); font-size: 14px; margin-top: 2px }
+.stages .leg.picked b { color: var(--dune) }

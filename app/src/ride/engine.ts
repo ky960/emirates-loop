@@ -245,7 +245,7 @@ export class RideEngine extends Emitter<{ state: RideState; arrival: Stop; check
       const pos = a.startM + a.dist, grade = gradeAt(prof, route.total, pos);
       let step: number;
       if (a.gradientEffect) {
-        kmh = this.vs.update(h, live.kmh, grade);
+        kmh = this.vs.update(h, live.kmh, grade, live.rpm);
         step = (kmh / 3.6) * h;
       } else {
         kmh = live.kmh;

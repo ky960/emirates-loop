@@ -66,9 +66,9 @@ export class SensorHub extends Emitter<{ change: SensorInfo[]; data: Live; error
     const crankFresh = this.crank.lastEvent > 0 && now - this.crank.lastEvent < STALE_MS;
     const trainerFresh = now - this.trainer.at < STALE_MS;
     const haveWheel = this.has("speed"), haveCrank = this.has("cadence"), haveTrainer = this.has("trainer");
-    if (haveWheel) { kmh = wheelFresh ? this.wheel.rate * (s.wheelMm / 1000) * 3.6 : 0; speedSource = "wheel"; }
+    if (haveWheel) { kmh = wheelFresh ? this.wheel.rateAt(now) * (s.wheelMm / 1000) * 3.6 : 0; speedSource = "wheel"; }
     else if (haveTrainer) { kmh = trainerFresh ? this.trainer.kmh : 0; speedSource = "trainer"; }
-    if (haveCrank) rpm = crankFresh ? this.crank.rate * 60 : 0;
+    if (haveCrank) rpm = crankFresh ? this.crank.rateAt(now) * 60 : 0;
     else if (haveTrainer && this.trainer.hasRpm) rpm = trainerFresh ? this.trainer.rpm : 0;
     if (!speedSource && rpm !== null) { kmh = (rpm / 60) * s.strokeM * 3.6; speedSource = "cadence"; }
     if (haveTrainer && this.trainer.hasW) watts = trainerFresh ? this.trainer.watts : 0;
