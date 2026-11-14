@@ -4,6 +4,7 @@ import { climbBetween, demProfile, gradeAt, flatProfile, gpxProfile, processProf
 import { RideEngine, type Frame, type RideState } from "./ride/engine";
 import { Ghost, pickBest } from "./ride/ghost";
 import { Pack } from "./ride/pack";
+import { ChallengeRunner, fmtSecs, localChallengeStore, planChallenges, type Challenge } from "./ride/challenges";
 import { ZONE_COLORS, ZONE_NAMES } from "./ride/metrics";
 import type { RideRecord } from "./ride/types";
 import { avgKmh } from "./ride/types";
@@ -34,6 +35,18 @@ let ghost = new Ghost(null);
 const hub = new SensorHub(() => ({ wheelMm: settings.wheelMm, strokeM: settings.strokeM }));
 // Other cyclists on the road (fewer on the Battery preset).
 const pack = new Pack(settings.quality === "battery" ? 3 : settings.quality === "balanced" ? 6 : 7, () => ({ massKg: settings.weightKg, bikeKg: 9 }));
+// Mini-challenges along the route (re-planned when the route or its terrain changes). Simulated rides set no records.
+const challengeStore = localChallengeStore();
+let challengeKey = "", challengeList: Challenge[] = [];
+const challenges = () => {
+  const k = `${route.id}|${profile.source}|${Math.round(profile.gain)}`;
+  if (k !== challengeKey) { challengeKey = k; challengeList = planChallenges(route, profile); }
+  return settings.challenges ? challengeList : [];
+};
+const runner = new ChallengeRunner(challenges, () => route, {
+  best: challengeStore.best,
+  record: (id, kind, t) => { if (!engine.current.sim) challengeStore.record(id, kind, t); },
+});
 const engine = new RideEngine({
   input: hub,
   route: () => route,
@@ -46,7 +59,8 @@ const engine = new RideEngine({
 const osm = new OsmTiles(14);
 // The skyline needs building heights, which only the z14 tiles carry; share one cache.
 const osmFar = osm;
-const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm, osmFar, pack: () => (settings.riders ? pack.bots : []) });
+const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm, osmFar, pack: () => (settings.riders ? pack.bots : []),
+  marks: () => challenges().flatMap((c) => (c.kind === "hold" ? [c.m0] : [c.m0, c.m1])) });
 const mapView = new MapView($("map"), () => settings);
 const audio = new RideAudio();
 audio.enabled = settings.sound;
@@ -311,6 +325,7 @@ engine.on("state", (s: RideState) => {
   renderControls();
   if (s === "riding") keepAwake();
   if (s === "idle") {
+    runner.reset(); // a new ride: every challenge is on offer again
     try { wake?.release(); } catch { /* ignore */ }
     wake = null;
     if (pendingRoute) { pendingRoute = null; selectRoute(true); }
@@ -320,7 +335,15 @@ engine.on("state", (s: RideState) => {
 engine.on("autostart", () => toast("Ride started · pedalling detected"));
 engine.on("checkpoint", (cp) => { db.set("active", cp).catch(() => {}); });
 let bannerUntil = 0;
+function showBanner(label: string, big: string, sub: string, ms = 5000) {
+  $("bLbl").textContent = label;
+  $("bName").textContent = big;
+  $("bSub").textContent = sub;
+  $("bSub").hidden = !sub;
+  bannerUntil = performance.now() + ms;
+}
 engine.on("arrival", (st) => {
+  $("bLbl").textContent = "Now arriving"; $("bSub").hidden = false;
   $("bName").textContent = st.name;
   $("bSub").textContent = route.loop && route.kind !== "gpx" ? `Stage ${st.stage} of ${route.legs.length} complete` : "Route complete";
   bannerUntil = performance.now() + 6000;
@@ -378,6 +401,33 @@ document.addEventListener("pointerdown", () => audio.unlock(), { once: true });
 document.addEventListener("el:sound", (e) => audio.setEnabled((e as CustomEvent<boolean>).detail));
 document.addEventListener("el:terrain", () => mapView.applyTerrain());
 
+// ===================== challenges =====================
+let chalStatus: ReturnType<ChallengeRunner["update"]>["status"] = null, lastTimer = 0;
+function challengeFrame(_dt: number, f: Frame) {
+  // Time challenges by the ride clock, not frame time: right even when frames are slow or the app is in the background.
+  const dt = Math.max(0, Math.min(5, f.timer - lastTimer));
+  lastTimer = f.timer;
+  const { events, status } = runner.update(dt, { pos: f.pos, kmh: f.kmh, rpm: f.rpm, riding: f.state === "riding" });
+  chalStatus = status;
+  for (const e of events) {
+    const kind = e.c.kind === "climb" ? "Climb" : e.c.kind === "sprint" ? "Sprint" : "Hold";
+    if (e.type === "approach") {
+      const best = challengeStore.best(e.c.id);
+      showBanner(`${kind} in ${Math.round(e.dist)} m`, e.c.kind === "climb" ? `${e.c.name} · ${Math.round((e.c.avg ?? 0) * 100)} %` : e.c.kind === "sprint" ? e.c.name : "Hold it", e.target ?? (best !== null ? `Your best ${fmtSecs(best)}` : "First time: set a time to beat"), 4500);
+    } else if (e.type === "start") {
+      showBanner(kind, "Go!", e.target ?? e.c.name, 2500);
+      audio.chime();
+    } else if (e.type === "finish") {
+      const d = e.best !== null ? e.time - e.best : 0;
+      showBanner(e.pr ? (e.best === null ? "Time set" : "New best!") : `${kind} done`, fmtSecs(e.time), e.best === null ? e.c.name : e.pr ? `${Math.abs(d).toFixed(1)} s faster than your best` : `Best ${fmtSecs(e.best)} · ${d.toFixed(1)} s slower`, 6000);
+      if (e.pr) audio.chime();
+    } else if (e.type === "done") {
+      showBanner("Hold complete", "Nailed it", `${e.target} for 60 s`, 5000);
+      audio.chime();
+    } else if (e.type === "fail") toast(`${kind} called off · ${e.why.toLowerCase()}`);
+  }
+}
+
 // ===================== HUD =====================
 let lastHud = 0, lastProfile = 0, lastNext = 0, nextCache = { name: "", lbl: "", sub: "" };
 function hud(f: Frame, now: number) {
@@ -419,6 +469,9 @@ function hud(f: Frame, now: number) {
   else if (next) { $("packTxt").textContent = `${next.bot.name} ahead`; $("packVal").textContent = `${Math.round(next.gap)} m`; }
   const nb = draft > 0.02 ? pack.ahead(f.pos, 7) : next;
   if (nb) $("packDot").style.setProperty("--kit", "#" + nb.bot.kit.toString(16).padStart(6, "0"));
+  const cs = chalStatus, cc = $("chalChip");
+  cc.hidden = !cs;
+  if (cs) { $("chalTxt").textContent = cs.label; $("chalVal").textContent = cs.value; $("chalSub").textContent = cs.sub ?? ""; $("chalSub").hidden = !cs.sub; }
   $("simChip").hidden = !f.sim;
   $("banner").classList.toggle("on", now < bannerUntil);
   // next stop card (every 2 s: includes a climb calculation)
@@ -457,6 +510,7 @@ function loop(now: number) {
   const f = engine.update();
   crank += (f.animRpm / 60) * TAU * dt;
   if (settings.riders) pack.update(dt, f.pos, f.kmh, f.state === "riding", (m) => gradeAt(profile, route.total, m));
+  challengeFrame(dt, f);
   if (view === "ride") {
     if (camMode === "road" && road.ready) { try { road.render(f, dt, crank); } catch (e) { console.error(e); } }
     mapView.update(f, dt, crank, now);

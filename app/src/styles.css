@@ -83,6 +83,8 @@ body.sim .stage { height: calc(100dvh - 258px) }
 .chip.sim { background: rgba(20, 110, 104, .78) }
 .chip.packc i { width: 10px; height: 10px; border-radius: 50%; background: var(--kit, #fff); box-shadow: 0 0 0 2px rgba(255, 255, 255, .5) }
 .chip.packc.draft { background: rgba(20, 90, 140, .82) }
+.chip.chalc { background: rgba(122, 46, 150, .82); display: grid; grid-template-columns: auto auto; column-gap: 10px; row-gap: 0; justify-items: end }
+.chip.chalc small { grid-column: 1 / -1; font-size: 12px; font-weight: 500; opacity: .9 }
 
 .camsw { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); z-index: 3; display: flex; gap: 4px; border-radius: 16px; padding: 5px }
 .camsw button { font: 700 14px var(--display); letter-spacing: .08em; text-transform: uppercase; color: #fff; background: transparent; border: 0; border-radius: 11px; min-width: 72px; min-height: var(--tap); padding: 8px 12px; cursor: pointer }

@@ -40,6 +40,7 @@
           </div>
           <div class="chips" id="chips">
             <span class="chip glass ghostc" id="ghostChip" hidden><i></i><span id="ghostTxt">Ghost</span><b id="ghostVal">0 m</b></span>
+            <span class="chip glass chalc" id="chalChip" hidden><span id="chalTxt"></span><b id="chalVal"></b><small id="chalSub"></small></span>
             <span class="chip glass packc" id="packChip" hidden><i id="packDot"></i><span id="packTxt"></span><b id="packVal"></b></span>
             <span class="chip glass warn" id="sensorChip" hidden></span>
             <span class="chip glass sim" id="simChip" hidden>Simulated</span>
@@ -53,7 +54,7 @@
           <button data-cam="loop" aria-pressed="false">Loop</button>
         </div>
 
-        <div class="banner" id="banner" aria-live="polite"><small>Now arriving</small><strong id="bName"></strong><span id="bSub"></span></div>
+        <div class="banner" id="banner" aria-live="polite"><small id="bLbl">Now arriving</small><strong id="bName"></strong><span id="bSub"></span></div>
         <div class="pausedov" id="pausedOv" hidden><strong>Paused</strong><span id="pausedSub">Pedal to resume</span></div>
 
         <div class="hud glass" id="hud">

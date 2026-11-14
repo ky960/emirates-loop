@@ -328,6 +328,7 @@ function makeShared() {
     sign: std(0x8e8e8a, { r: 0.5, m: 0.5 }),
     canopy: std(0xece6d8, { r: 0.9, x: { side: THREE.DoubleSide } }),
     flower: std(0xffffff, { r: 0.95 }),
+    checkB: std(0x1b1b1e, { r: 0.6, x: off(-6) }),
     glass: new THREE.MeshStandardMaterial({ color: 0xbcd6de, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }),
     shelter: std(0xd9dcde, { r: 0.4, m: 0.6 }),
     flag: (() => {
@@ -344,6 +345,7 @@ function makeShared() {
   GEO.post = new THREE.BoxGeometry(0.1, 0.95, 0.1).translate(0, 0.475, 0);
   GEO.bay = new THREE.BoxGeometry(0.12, 0.01, 5.4); // parking bay line, lengthwise across the road direction
   GEO.zebra = new THREE.BoxGeometry(0.5, 0.01, 3.2); // crossing stripe, lengthwise along the road
+  GEO.check = new THREE.BoxGeometry(0.5, 0.01, 0.5); // chequered challenge line square
   GEO.flower = new THREE.IcosahedronGeometry(1, 1);
   GEO.flag = new THREE.PlaneGeometry(1.6, 0.8, 16, 4).translate(0.8, 0, 0); // hoist edge at x = 0
   // Bus shelter (local x along the road, +z toward the back): roof, glass back and ends, posts, bench.
@@ -617,7 +619,8 @@ export class RoadView {
     return b;
   })();
 
-  constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles; osmFar?: OsmTiles; pack?: () => Bot[] }) {
+  constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles; osmFar?: OsmTiles; pack?: () => Bot[];
+    /** Challenge start/finish lines, metres along one lap. */ marks?: () => number[] }) {
     this.quality = deps.settings().quality;
   }
 
@@ -867,7 +870,7 @@ export class RoadView {
     yield;
 
     // Props, placed by route distance so they don't jump when the window is rebuilt.
-    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], camel: [], flag: [], flower: [], zebra: [], shelter: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
+    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], camel: [], flag: [], checkW: [], checkB: [], flower: [], zebra: [], shelter: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
     // Scenery off the road must clear the opposite carriageway on the left.
     const off = (sd: number, base: number) => (sd > 0 ? base : -(base + (city ? 14 : 9)));
     const each = (spacing: number, fn: (d: number, r: () => number) => void) => {
@@ -1090,6 +1093,20 @@ export class RoadView {
     const palmLod = palms.length ? new PalmLod(palms, MODELS?.palm ? q.palmNear : 0, group) : null;
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
     add(inst(GEO.rock, MAT.rock, it.rock));
+    // Chequered start and finish lines for the challenges, across your carriageway.
+    for (const L of this.deps.marks?.() ?? []) {
+      const lapN = Math.floor((m0 + A - L) / route.total);
+      for (const n of route.loop ? [lapN, lapN + 1] : [0]) {
+        const d = L + n * route.total - m0;
+        if (d < A + 20 || d > B - 20) continue;
+        const { a } = place(d, 0), ry = Math.atan2(a.t.x, a.t.z);
+        for (let row = 0; row < 2; row++) for (let k = 0; k < 15; k++) {
+          const pt = a.p.clone().addScaledVector(a.n, -3.5 + k * 0.5 + 0.25).addScaledVector(a.t, row * 0.5);
+          ((k + row) % 2 ? it.checkB : it.checkW).push({ x: pt.x, y: a.p.y + 0.107, z: pt.z, ry });
+        }
+      }
+    }
+    add(inst(GEO.check, MAT.white, it.checkW, false)); add(inst(GEO.check, MAT.checkB, it.checkB, false));
     MODELS?.camel?.forEach((p) => add(inst(p.geo, p.mat, it.camel, !!p.shadow)));
     if (scen?.dhows.length) MODELS?.dhow?.forEach((p) => add(inst(p.geo, p.mat, scen!.dhows, !!p.shadow)));
     for (const { lm, p } of lms) {

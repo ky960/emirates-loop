@@ -24,6 +24,8 @@ export interface Settings {
   cinematic: boolean;
   /** Other cyclists on the road, with slipstream. */
   riders: boolean;
+  /** Sprints, holds and climbs along the route. */
+  challenges: boolean;
   showPower: boolean;
   quality: Quality;
   camera: Camera;
@@ -49,6 +51,7 @@ export const DEFAULTS: Settings = {
   traffic: true,
   cinematic: true,
   riders: true,
+  challenges: true,
   showPower: false,
   quality: "balanced",
   camera: "road",
