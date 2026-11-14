@@ -44,10 +44,11 @@ export class VirtualSpeed {
   reset() { this.v = this.vsSm = this.decel = this.spinFor = 0; this.coasting = false; }
 
   /**
-   * sensorKmh: flat-equivalent speed from the sensor; rpm: measured cadence, or null without a cadence sensor.
+   * sensorKmh: flat-equivalent speed from the sensor; rpm: measured cadence, or null without a cadence sensor;
+   * draft: air-drag reduction from riding in another rider's slipstream (0..~0.33).
    * Returns the virtual speed (km/h).
    */
-  update(dt: number, sensorKmh: number, grade: number, rpm: number | null = null): number {
+  update(dt: number, sensorKmh: number, grade: number, rpm: number | null = null, draft = 0): number {
     const vs = sensorKmh / 3.6;
     if (dt <= 0) return this.v * 3.6;
     // Trend of the sensor speed (it updates about once a second, so smooth before differentiating).
@@ -78,7 +79,7 @@ export class VirtualSpeed {
     for (let t = 0; t < dt - 1e-9; ) {
       const h = Math.min(0.05, dt - t);
       t += h;
-      const drive = Math.max(0, (P * ETA) / Math.max(this.v, 2) + push), resist = m * G * (CRR * Math.cos(th) + Math.sin(th)) + 0.5 * RHO * CDA * this.v * this.v;
+      const drive = Math.max(0, (P * ETA) / Math.max(this.v, 2) + push), resist = m * G * (CRR * Math.cos(th) + Math.sin(th)) + 0.5 * RHO * CDA * (1 - draft) * this.v * this.v;
       let a = (Math.min(drive, 600) - resist) / (m + 1.5) + follow; // +1.5 kg: wheels' rotating inertia
       if (braking) a -= 2.5;
       // Rolling resistance and brakes hold a stopped bike; they never push it backwards.

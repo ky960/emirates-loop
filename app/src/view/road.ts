@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { eleAt, type ElevationProfile } from "../elevation";
+import { eleAt, gradeAt, type ElevationProfile } from "../elevation";
 import { hav, type LngLat } from "../geo";
 import type { Frame } from "../ride/engine";
 import type { Route } from "../route";
@@ -13,8 +13,11 @@ import type { OsmData, OsmTiles } from "./osm";
 import { carGeometry, ghafGeometry, JERSEY, palmCrownGeometry, palmTrunkGeometry, sweep, WBEAM } from "./props";
 import { LANDMARKS, loadLandmark, loadModels, type Landmark, type Models, type Part } from "./models";
 import { Pedestrians } from "./people";
-import { buildModelRider, buildRider, type RiderModel } from "./rider";
+import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
+import type { Bot } from "../ride/pack";
+import { buildModelRider, buildRider, DEFAULT_KIT, type RiderModel } from "./rider";
 import { uaeFlagTexture } from "./textures";
+import { daylightAt, hourFor, lampPoolTexture, starField } from "./daylight";
 import { barkTexture, blobTexture, facadeTextures, frondTexture, groundDetailTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
 
 type Biome = "desert" | "city" | "mountains" | "oasis" | "flat";
@@ -264,6 +267,7 @@ function facadeMaterials(): Record<string, THREE.Material> {
   for (const st of FACADE_STYLES) {
     const { map, emissive } = facadeTextures(st), l = look[st];
     out["facade_" + st] = new THREE.MeshStandardMaterial({ map, vertexColors: true, roughness: l.r, metalness: l.m, emissive: new THREE.Color(0xffffff), emissiveMap: emissive, emissiveIntensity: l.e, envMapIntensity: st === "glass" ? 1.4 : 0.8 });
+    out["facade_" + st].userData.baseE = l.e; // lit windows glow brighter at night
   }
   out.roof = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 });
   return out;
@@ -326,6 +330,8 @@ function makeShared() {
     sign: std(0x8e8e8a, { r: 0.5, m: 0.5 }),
     canopy: std(0xece6d8, { r: 0.9, x: { side: THREE.DoubleSide } }),
     flower: std(0xffffff, { r: 0.95 }),
+    pool: new THREE.MeshBasicMaterial({ map: lampPoolTexture(), color: 0xffd39a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }),
+    checkB: std(0x1b1b1e, { r: 0.6, x: off(-6) }),
     glass: new THREE.MeshStandardMaterial({ color: 0xbcd6de, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }),
     shelter: std(0xd9dcde, { r: 0.4, m: 0.6 }),
     flag: (() => {
@@ -342,6 +348,8 @@ function makeShared() {
   GEO.post = new THREE.BoxGeometry(0.1, 0.95, 0.1).translate(0, 0.475, 0);
   GEO.bay = new THREE.BoxGeometry(0.12, 0.01, 5.4); // parking bay line, lengthwise across the road direction
   GEO.zebra = new THREE.BoxGeometry(0.5, 0.01, 3.2); // crossing stripe, lengthwise along the road
+  GEO.check = new THREE.BoxGeometry(0.5, 0.01, 0.5); // chequered challenge line square
+  GEO.pool = new THREE.PlaneGeometry(11, 11).rotateX(-Math.PI / 2); // light on the road under a street lamp
   GEO.flower = new THREE.IcosahedronGeometry(1, 1);
   GEO.flag = new THREE.PlaneGeometry(1.6, 0.8, 16, 4).translate(0.8, 0, 0); // hoist edge at x = 0
   // Bus shelter (local x along the road, +z toward the back): roof, glass back and ends, posts, bench.
@@ -602,6 +610,11 @@ export class RoadView {
   private t = 0;
   private quality: Quality;
   private traffic: Traffic | null = null;
+  private envTex: THREE.Texture | null = null;
+  private stars!: THREE.Points;
+  private nightLight!: THREE.PointLight;
+  /** 3D riders for the other cyclists, by bot id; rebuilt as detailed models once those load. */
+  private botModels = new Map<number, RiderModel>();
   private people: Pedestrians | null = null;
   /** Where the current (or next) ride starts; the parking lot is built there. */
   private lotS = 0;
@@ -613,7 +626,8 @@ export class RoadView {
     return b;
   })();
 
-  constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles; osmFar?: OsmTiles }) {
+  constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles; osmFar?: OsmTiles; pack?: () => Bot[];
+    /** Challenge start/finish lines, metres along one lap. */ marks?: () => number[] }) {
     this.quality = deps.settings().quality;
   }
 
@@ -646,7 +660,7 @@ export class RoadView {
     const pm = new THREE.PMREMGenerator(this.renderer);
     new RGBELoader().load(import.meta.env.BASE_URL + "env/quarry_01_1k.hdr", (hdr) => {
       hdr.mapping = THREE.EquirectangularReflectionMapping;
-      s.environment = pm.fromEquirectangular(hdr).texture;
+      s.environment = this.envTex = pm.fromEquirectangular(hdr).texture;
       hdr.dispose();
       pm.dispose();
       this.hemi.intensity = 0.1;
@@ -655,6 +669,11 @@ export class RoadView {
     loadModels(import.meta.env.BASE_URL).then((m) => { MODELS = m; this.modelsArrived(); }).catch((e) => console.warn(e));
     this.hemi = new THREE.HemisphereLight(0xfff0dc, 0x9a7a58, 0.55);
     s.add(this.hemi);
+    this.stars = starField();
+    s.add(this.stars);
+    // At night: warm light around you, standing in for the street lamps overhead (zero by day).
+    this.nightLight = new THREE.PointLight(0xffd9a8, 0, 26, 1.6);
+    s.add(this.nightLight);
     const sun = new THREE.DirectionalLight(0xffd9ac, 3.1);
     const q = QUALITY[this.quality];
     if (q.shadow) {
@@ -863,7 +882,7 @@ export class RoadView {
     yield;
 
     // Props, placed by route distance so they don't jump when the window is rebuilt.
-    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], camel: [], flag: [], flower: [], zebra: [], shelter: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
+    const it: Record<string, Item[]> = { post: [], refl: [], pole: [], arm: [], lamp: [], ghafW: [], ghafCan: [], shrub: [], rock: [], camel: [], flag: [], checkW: [], checkB: [], flower: [], zebra: [], shelter: [], gpost: [], roofUnit: scen?.roofUnits ?? [] };
     // Scenery off the road must clear the opposite carriageway on the left.
     const off = (sd: number, base: number) => (sd > 0 ? base : -(base + (city ? 14 : 9)));
     const each = (spacing: number, fn: (d: number, r: () => number) => void) => {
@@ -994,6 +1013,8 @@ export class RoadView {
     add(inst(GEO.gpost, MAT.gpost, it.gpost)); add(inst(GEO.refl, MAT.refl, it.refl, false));
     add(inst(GEO.roofUnit, MAT.roofUnit, it.roofUnit));
     add(inst(GEO.pole, MAT.pole, it.pole)); add(inst(GEO.arm, MAT.pole, it.arm)); add(inst(GEO.lamp, MAT.lamp, it.lamp, false));
+    // Pools of lamplight on the road below each lamp head (only visible at night).
+    add(inst(GEO.pool, MAT.pool, it.lamp.map((l) => ({ x: l.x, y: l.y - 10.58, z: l.z })), false));
     // ---- Parking lot at the ride start: two rows of bays, shade canopies, lamps, palms, parked cars. ----
     const lotY = city ? 0.25 : 0.1;
     if (lotF) {
@@ -1058,6 +1079,7 @@ export class RoadView {
       }
       add(inst(GEO.bay, MAT.white, lotItems.bay, false)); add(inst(GEO.pole, MAT.pole, lotItems.post));
       add(inst(GEO.pole, MAT.pole, lotItems.pole)); add(inst(GEO.arm, MAT.pole, lotItems.arm)); add(inst(GEO.lamp, MAT.lamp, lotItems.lamp, false));
+      add(inst(GEO.pool, MAT.pool, lotItems.lamp.map((l) => ({ x: l.x, y: l.y - 10.58, z: l.z })), false));
       // Parked cars, nose in, in about half the bays (never in the rider's way out).
       const kinds = MODELS?.cars ?? [];
       if (kinds.length) {
@@ -1086,6 +1108,20 @@ export class RoadView {
     const palmLod = palms.length ? new PalmLod(palms, MODELS?.palm ? q.palmNear : 0, group) : null;
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
     add(inst(GEO.rock, MAT.rock, it.rock));
+    // Chequered start and finish lines for the challenges, across your carriageway.
+    for (const L of this.deps.marks?.() ?? []) {
+      const lapN = Math.floor((m0 + A - L) / route.total);
+      for (const n of route.loop ? [lapN, lapN + 1] : [0]) {
+        const d = L + n * route.total - m0;
+        if (d < A + 20 || d > B - 20) continue;
+        const { a } = place(d, 0), ry = Math.atan2(a.t.x, a.t.z);
+        for (let row = 0; row < 2; row++) for (let k = 0; k < 15; k++) {
+          const pt = a.p.clone().addScaledVector(a.n, -3.5 + k * 0.5 + 0.25).addScaledVector(a.t, row * 0.5);
+          ((k + row) % 2 ? it.checkB : it.checkW).push({ x: pt.x, y: a.p.y + 0.107, z: pt.z, ry });
+        }
+      }
+    }
+    add(inst(GEO.check, MAT.white, it.checkW, false)); add(inst(GEO.check, MAT.checkB, it.checkB, false));
     MODELS?.camel?.forEach((p) => add(inst(p.geo, p.mat, it.camel, !!p.shadow)));
     if (scen?.dhows.length) MODELS?.dhow?.forEach((p) => add(inst(p.geo, p.mat, scen!.dhows, !!p.shadow)));
     for (const { lm, p } of lms) {
@@ -1149,6 +1185,9 @@ export class RoadView {
       this.scene.add(mr.g);
       this.rider = mr;
     }
+    // Other cyclists switch to the detailed rider model too.
+    for (const m of this.botModels.values()) this.scene.remove(m.g);
+    this.botModels.clear();
     if (MODELS?.walkers.length && !this.people) {
       this.people = new Pedestrians(MODELS.walkers, QUALITY[this.quality].people);
       this.scene.add(this.people.group);
@@ -1158,6 +1197,49 @@ export class RoadView {
       this.traffic.dispose();
       this.traffic = new Traffic(QUALITY[this.quality].cars);
       this.scene.add(this.traffic.group);
+    }
+  }
+
+  private lastNight = -1;
+  private applyDaylight(D: ReturnType<typeof daylightAt>) {
+    this.sun.color.copy(D.sun); this.sun.intensity = D.sunI;
+    this.hemi.color.copy(D.hemiSky); this.hemi.groundColor.copy(D.hemiGround);
+    this.hemi.intensity = this.envTex && D.night < 0.6 ? D.hemiI : D.hemiI + 0.25;
+    (this.scene.fog as THREE.FogExp2).color.copy(D.haze);
+    this.renderer.toneMappingExposure = D.exposure;
+    (this.stars.material as THREE.PointsMaterial).opacity = Math.max(0, D.night - 0.2) / 0.8;
+    // Sky reflections switch off at night (one shader change), so glass and metal don't glow with daylight.
+    const env = D.night < 0.6 ? this.envTex : null;
+    if (this.scene.environment !== env) this.scene.environment = env;
+    if (Math.abs(D.night - this.lastNight) > 0.01) {
+      this.lastNight = D.night;
+      for (const st of FACADE_STYLES) { const m = MAT["facade_" + st] as THREE.MeshStandardMaterial; m.emissiveIntensity = m.userData.baseE + D.night * 1.4; }
+      (MAT.lamp as THREE.MeshStandardMaterial).emissiveIntensity = 1.6 + D.night * 2;
+      (MAT.pool as THREE.MeshBasicMaterial).opacity = D.night * 0.95;
+    }
+  }
+
+  /** Other cyclists: shown within 160 m of you (small and cheap beyond that), each on the left of the lane. */
+  private renderBots(dt: number, pos: number, onPath: (m: number, lat?: number) => { p: THREE.Vector3; t: THREE.Vector3 }) {
+    const bots = this.deps.pack?.() ?? [];
+    for (const [id, m] of this.botModels) if (!bots.some((b) => b.id === id)) m.g.visible = false;
+    const prof = this.deps.profile(), total = this.deps.route().total;
+    for (const b of bots) {
+      const near = Math.abs(b.m - pos) < 160;
+      let model = this.botModels.get(b.id);
+      if (!near) { if (model) model.g.visible = false; continue; }
+      if (!model) {
+        const kit = { ...DEFAULT_KIT, jersey: b.kit };
+        model = (MODELS?.cyclistSrc && buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, kit)) || buildRider(undefined, kit);
+        model.g.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
+        this.scene.add(model.g);
+        this.botModels.set(b.id, model);
+      }
+      const { p, t } = onPath(b.m, b.lat);
+      model.g.visible = true;
+      model.g.position.set(p.x, p.y + 0.13, p.z);
+      model.g.rotation.set(Math.atan(gradeAt(prof, total, b.m)) * 0.9, Math.atan2(-t.x, -t.z), 0, "YXZ");
+      model.update(dt, b.v, b.crank);
     }
   }
 
@@ -1381,9 +1463,16 @@ export class RoadView {
       this.ghost.setOpacity?.(0.5 * smoothstep(3.5, 9, G.position.distanceTo(this.cam.position)));
     } else this.ghost.setOpacity?.(0);
 
+    // Time of day: sun height and colour, ambient, haze, exposure; at night lit windows, lamp pools and stars.
+    const D = daylightAt(hourFor(this.deps.settings().timeOfDay ?? "auto", f.timer));
     const sky = fwd.clone().applyAxisAngle(UP, 0.55);
-    this.sky.material.uniforms.sunPosition.value.set(sky.x, 0.11, sky.z).normalize();
-    const key = fwd.clone().applyAxisAngle(UP, 1.15), ld = V3(key.x * 0.82, 0.55, key.z * 0.82).normalize();
+    this.sky.material.uniforms.sunPosition.value.set(sky.x * Math.cos(D.sunElev), Math.sin(D.sunElev), sky.z * Math.cos(D.sunElev)).normalize();
+    // The key light is the sun by day and stands in for the moon (higher, dim and blue) at night.
+    const lightEl = THREE.MathUtils.lerp(Math.max(0.07, D.sunElev), 0.65, D.night);
+    const key = fwd.clone().applyAxisAngle(UP, 1.15), ld = V3(key.x * Math.cos(lightEl), Math.sin(lightEl), key.z * Math.cos(lightEl)).normalize();
+    this.applyDaylight(D);
+    this.nightLight.position.set(rp.x, rp.y + 6, rp.z).addScaledVector(fwd, 2);
+    this.nightLight.intensity = D.night * 140;
     // Centre the shadow box ahead of the rider, where the camera is looking, and snap it to whole
     // shadow texels so shadow edges don't shimmer as the rider moves.
     const sq = QUALITY[this.quality], ahead = rp.clone().addScaledVector(fwd, sq.shadowR * 0.6);
@@ -1401,6 +1490,7 @@ export class RoadView {
     w.palms?.update(dt, rp, fwd);
     FLAG_TIME.value += dt;
     this.people?.update(dt, f.pos, { onPath, city: w.biome === "city", sidewalkY: 0.22 });
+    this.renderBots(dt, f.pos, onPath);
     if (this.traffic) this.traffic.update(dt, f.pos, { onPath, city: w.biome === "city", lo: w.m0 - 480, hi: w.m0 + 2680 });
     this.renderer.render(this.scene, this.cam);
   }

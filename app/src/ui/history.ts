@@ -6,6 +6,8 @@ import type { RideRecord } from "../ride/types";
 import { avgKmh } from "../ride/types";
 import { pointAt } from "../route";
 import { deleteRide, progressOf } from "../store/rides";
+import { badges, streak } from "../ride/badges";
+import { localChallengeStore } from "../ride/challenges";
 import { fmtDuration, fmtShortDuration } from "../util";
 import { drawRideChart, drawWeekly } from "./charts";
 import { html, raw, sheet, toast } from "./dom";
@@ -39,6 +41,7 @@ export function renderHistory(el: HTMLElement, ctx: AppCtx) {
   const climb = rides.reduce<RideRecord | null>((a, r) => (!a || r.climb > a.climb ? r : a), null);
   const f10 = rides.map((r) => ({ r, t: fastest(r, 10000) })).filter((x) => x.t !== null).sort((a, b) => a.t! - b.t!)[0];
   const day = (t: number) => new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  const st = streak(rides), bs = badges(rides, route, localChallengeStore().log());
 
   el.innerHTML = html`
     <div class="totals">
@@ -46,6 +49,10 @@ export function renderHistory(el: HTMLElement, ctx: AppCtx) {
       <div class="stat"><span class="label">This week</span><div class="big">${weekKm.toFixed(1)}<em>km</em></div></div>
       <div class="stat"><span class="label">Rides</span><div class="big">${rides.length}</div><span class="sub">${fmtShortDuration(secs)} in the saddle</span></div>
       <div class="stat"><span class="label">Best average</span><div class="big">${best ? best.toFixed(1) : "—"}<em>km/h</em></div><span class="sub">rides of 10 min or more</span></div>
+      <div class="stat"><span class="label">Streak</span><div class="big">${st.current}<em>day${st.current === 1 ? "" : "s"}</em></div><span class="sub">best ${st.best} day${st.best === 1 ? "" : "s"} in a row</span></div>
+    </div>
+    <div class="card"><h2>Badges <span class="muted" style="font-size:16px;letter-spacing:0">${bs.filter((b) => b.earned).length} of ${bs.length}</span></h2>
+      <div class="badges">${bs.map((b) => html`<div class="badge ${b.earned ? "earned" : ""}" title="${b.desc}"><span class="ico">${b.icon}</span><b>${b.title}</b><small>${b.desc}</small>${!b.earned && b.progress ? html`<div class="bar"><div style="width:${((b.progress[0] / b.progress[1]) * 100).toFixed(0)}%"></div></div><small>${b.progress[0].toLocaleString()} / ${b.progress[1].toLocaleString()}</small>` : ""}</div>`)}</div>
     </div>
     <div class="grid2">
       <div class="card"><h2>Weekly distance</h2><canvas class="chart small" id="weekCv"></canvas></div>

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { makeWalkers, type Walker } from "./people";
 
 /**
@@ -12,7 +13,7 @@ import { makeWalkers, type Walker } from "./people";
 
 /** One piece of a model, baked into model space (metres, ground at y = 0, facing -Z). */
 export interface Part { geo: THREE.BufferGeometry; mat: THREE.Material; paint?: boolean; shadow?: boolean }
-export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; walkers: Walker[]; dhow?: Part[]; camel?: Part[] }
+export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[] }
 
 const FILES = { palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
 /** Pedestrians (RenderPeople, CC BY 4.0); the first one carries the walk cycle. */
@@ -132,7 +133,7 @@ export async function loadModels(base: string): Promise<Models> {
     out.cars.push(parts);
   }
 
-  if (cyclist) out.cyclist = cyclist;
+  if (cyclist) { out.cyclist = cyclist; out.cyclistSrc = cloneSkinned(cyclist.scene); }
   return out;
 }
 

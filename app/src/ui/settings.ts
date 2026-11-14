@@ -60,6 +60,8 @@ export function renderSettings(el: HTMLElement, ctx: AppCtx) {
       ${sw("autoPause", "Auto-pause", "Stops the clock when you stop pedalling; pedal to carry on.")}
       ${sw("ghost", "Race your ghost", "Replays your best ride second by second.")}
       ${sw("sound", "Ride sound", "Wind, freewheel and a chime at each town.")}
+      ${sw("challenges", "Challenges", "Sprints, cadence holds and climbs every few kilometres, with your best times to beat. Simulated rides don't set records.")}
+      ${sw("riders", "Other cyclists", "Riders to catch and some who come past. Tuck in close behind one for a slipstream: less drag, more speed.")}
       ${sw("traffic", "Traffic", "Cars on the road in the 3D view. Changes the next time the app opens.")}
       ${sw("showPower", "Show estimated power", "Estimated from speed — not a power meter.")}
     </div>
@@ -68,6 +70,8 @@ export function renderSettings(el: HTMLElement, ctx: AppCtx) {
       <h2>Display</h2>
       <div class="field"><span class="flabel">Graphics</span>${seg("quality", [["battery", "Battery"], ["balanced", "Balanced"], ["max", "Max"]])}
         <small>Battery: 30 fps, no shadows — coolest for long rides. Balanced: 60 fps. Max: full detail at the screen's refresh rate.</small></div>
+      <div class="field"><span class="flabel">Time of day</span>${seg("timeOfDay", [["auto", "Your clock"], ["sunrise", "Sunrise"], ["day", "Midday"], ["sunset", "Sunset"], ["night", "Night"], ["cycle", "As you ride"]])}
+        <small>"Your clock" follows the time where you are. "As you ride" passes from sunrise to night over an hour of riding.</small></div>
       ${sw("cinematic", "Cinematic camera", "The road view glides from the usual chase view to an aerial, a side and a front view of you, then back, every couple of minutes.")}
       ${sw("terrain", "3D terrain on the map", "Hills and mountains on the map views.")}
       <div class="field"><span class="flabel">Full screen</span><button class="btn sm ghost" data-a="fs">Go full screen</button><small>Or add the app to your home screen from Chrome's menu — it then always opens full screen.</small></div>

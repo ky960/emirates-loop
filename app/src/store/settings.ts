@@ -1,5 +1,6 @@
 import type { GpxTrack } from "../route";
 
+export type TimeOfDay = "auto" | "sunrise" | "day" | "sunset" | "night" | "cycle";
 export type Quality = "battery" | "balanced" | "max";
 export type Camera = "road" | "map" | "stage" | "loop";
 export type Sex = "male" | "female" | "unspecified";
@@ -22,6 +23,12 @@ export interface Settings {
   traffic: boolean;
   /** Road view tours the rider: chase, aerial, side and front shots, gliding between them. */
   cinematic: boolean;
+  /** Other cyclists on the road, with slipstream. */
+  riders: boolean;
+  /** Sprints, holds and climbs along the route. */
+  challenges: boolean;
+  /** Sky and light in the road view: your clock, a fixed time, or a day passing as you ride. */
+  timeOfDay: TimeOfDay;
   showPower: boolean;
   quality: Quality;
   camera: Camera;
@@ -46,6 +53,9 @@ export const DEFAULTS: Settings = {
   sound: true,
   traffic: true,
   cinematic: true,
+  riders: true,
+  challenges: true,
+  timeOfDay: "auto",
   showPower: false,
   quality: "balanced",
   camera: "road",

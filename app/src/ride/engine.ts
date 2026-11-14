@@ -27,6 +27,8 @@ export interface EngineDeps {
   /** Route position (m, cumulative) where the next ride starts: total of saved rides. */
   basePos: () => number;
   ghost: () => Ghost;
+  /** Air-drag reduction from another rider's slipstream at a route position (0 when riding alone). */
+  draft?: (pos: number) => number;
   now?: () => number;
 }
 
@@ -245,7 +247,7 @@ export class RideEngine extends Emitter<{ state: RideState; arrival: Stop; check
       const pos = a.startM + a.dist, grade = gradeAt(prof, route.total, pos);
       let step: number;
       if (a.gradientEffect) {
-        kmh = this.vs.update(h, live.kmh, grade, live.rpm);
+        kmh = this.vs.update(h, live.kmh, grade, live.rpm, this.d.draft?.(pos) ?? 0);
         step = (kmh / 3.6) * h;
       } else {
         kmh = live.kmh;
