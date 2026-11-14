@@ -17,6 +17,7 @@ import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js
 import type { Bot } from "../ride/pack";
 import { buildModelRider, buildRider, DEFAULT_KIT, type RiderModel } from "./rider";
 import { uaeFlagTexture } from "./textures";
+import { daylightAt, hourFor, lampPoolTexture, starField } from "./daylight";
 import { barkTexture, blobTexture, facadeTextures, frondTexture, groundDetailTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
 
 type Biome = "desert" | "city" | "mountains" | "oasis" | "flat";
@@ -266,6 +267,7 @@ function facadeMaterials(): Record<string, THREE.Material> {
   for (const st of FACADE_STYLES) {
     const { map, emissive } = facadeTextures(st), l = look[st];
     out["facade_" + st] = new THREE.MeshStandardMaterial({ map, vertexColors: true, roughness: l.r, metalness: l.m, emissive: new THREE.Color(0xffffff), emissiveMap: emissive, emissiveIntensity: l.e, envMapIntensity: st === "glass" ? 1.4 : 0.8 });
+    out["facade_" + st].userData.baseE = l.e; // lit windows glow brighter at night
   }
   out.roof = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 });
   return out;
@@ -328,6 +330,7 @@ function makeShared() {
     sign: std(0x8e8e8a, { r: 0.5, m: 0.5 }),
     canopy: std(0xece6d8, { r: 0.9, x: { side: THREE.DoubleSide } }),
     flower: std(0xffffff, { r: 0.95 }),
+    pool: new THREE.MeshBasicMaterial({ map: lampPoolTexture(), color: 0xffd39a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }),
     checkB: std(0x1b1b1e, { r: 0.6, x: off(-6) }),
     glass: new THREE.MeshStandardMaterial({ color: 0xbcd6de, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }),
     shelter: std(0xd9dcde, { r: 0.4, m: 0.6 }),
@@ -346,6 +349,7 @@ function makeShared() {
   GEO.bay = new THREE.BoxGeometry(0.12, 0.01, 5.4); // parking bay line, lengthwise across the road direction
   GEO.zebra = new THREE.BoxGeometry(0.5, 0.01, 3.2); // crossing stripe, lengthwise along the road
   GEO.check = new THREE.BoxGeometry(0.5, 0.01, 0.5); // chequered challenge line square
+  GEO.pool = new THREE.PlaneGeometry(11, 11).rotateX(-Math.PI / 2); // light on the road under a street lamp
   GEO.flower = new THREE.IcosahedronGeometry(1, 1);
   GEO.flag = new THREE.PlaneGeometry(1.6, 0.8, 16, 4).translate(0.8, 0, 0); // hoist edge at x = 0
   // Bus shelter (local x along the road, +z toward the back): roof, glass back and ends, posts, bench.
@@ -606,6 +610,9 @@ export class RoadView {
   private t = 0;
   private quality: Quality;
   private traffic: Traffic | null = null;
+  private envTex: THREE.Texture | null = null;
+  private stars!: THREE.Points;
+  private nightLight!: THREE.PointLight;
   /** 3D riders for the other cyclists, by bot id; rebuilt as detailed models once those load. */
   private botModels = new Map<number, RiderModel>();
   private people: Pedestrians | null = null;
@@ -653,7 +660,7 @@ export class RoadView {
     const pm = new THREE.PMREMGenerator(this.renderer);
     new RGBELoader().load(import.meta.env.BASE_URL + "env/quarry_01_1k.hdr", (hdr) => {
       hdr.mapping = THREE.EquirectangularReflectionMapping;
-      s.environment = pm.fromEquirectangular(hdr).texture;
+      s.environment = this.envTex = pm.fromEquirectangular(hdr).texture;
       hdr.dispose();
       pm.dispose();
       this.hemi.intensity = 0.1;
@@ -662,6 +669,11 @@ export class RoadView {
     loadModels(import.meta.env.BASE_URL).then((m) => { MODELS = m; this.modelsArrived(); }).catch((e) => console.warn(e));
     this.hemi = new THREE.HemisphereLight(0xfff0dc, 0x9a7a58, 0.55);
     s.add(this.hemi);
+    this.stars = starField();
+    s.add(this.stars);
+    // At night: warm light around you, standing in for the street lamps overhead (zero by day).
+    this.nightLight = new THREE.PointLight(0xffd9a8, 0, 26, 1.6);
+    s.add(this.nightLight);
     const sun = new THREE.DirectionalLight(0xffd9ac, 3.1);
     const q = QUALITY[this.quality];
     if (q.shadow) {
@@ -1001,6 +1013,8 @@ export class RoadView {
     add(inst(GEO.gpost, MAT.gpost, it.gpost)); add(inst(GEO.refl, MAT.refl, it.refl, false));
     add(inst(GEO.roofUnit, MAT.roofUnit, it.roofUnit));
     add(inst(GEO.pole, MAT.pole, it.pole)); add(inst(GEO.arm, MAT.pole, it.arm)); add(inst(GEO.lamp, MAT.lamp, it.lamp, false));
+    // Pools of lamplight on the road below each lamp head (only visible at night).
+    add(inst(GEO.pool, MAT.pool, it.lamp.map((l) => ({ x: l.x, y: l.y - 10.58, z: l.z })), false));
     // ---- Parking lot at the ride start: two rows of bays, shade canopies, lamps, palms, parked cars. ----
     const lotY = city ? 0.25 : 0.1;
     if (lotF) {
@@ -1065,6 +1079,7 @@ export class RoadView {
       }
       add(inst(GEO.bay, MAT.white, lotItems.bay, false)); add(inst(GEO.pole, MAT.pole, lotItems.post));
       add(inst(GEO.pole, MAT.pole, lotItems.pole)); add(inst(GEO.arm, MAT.pole, lotItems.arm)); add(inst(GEO.lamp, MAT.lamp, lotItems.lamp, false));
+      add(inst(GEO.pool, MAT.pool, lotItems.lamp.map((l) => ({ x: l.x, y: l.y - 10.58, z: l.z })), false));
       // Parked cars, nose in, in about half the bays (never in the rider's way out).
       const kinds = MODELS?.cars ?? [];
       if (kinds.length) {
@@ -1182,6 +1197,25 @@ export class RoadView {
       this.traffic.dispose();
       this.traffic = new Traffic(QUALITY[this.quality].cars);
       this.scene.add(this.traffic.group);
+    }
+  }
+
+  private lastNight = -1;
+  private applyDaylight(D: ReturnType<typeof daylightAt>) {
+    this.sun.color.copy(D.sun); this.sun.intensity = D.sunI;
+    this.hemi.color.copy(D.hemiSky); this.hemi.groundColor.copy(D.hemiGround);
+    this.hemi.intensity = this.envTex && D.night < 0.6 ? D.hemiI : D.hemiI + 0.25;
+    (this.scene.fog as THREE.FogExp2).color.copy(D.haze);
+    this.renderer.toneMappingExposure = D.exposure;
+    (this.stars.material as THREE.PointsMaterial).opacity = Math.max(0, D.night - 0.2) / 0.8;
+    // Sky reflections switch off at night (one shader change), so glass and metal don't glow with daylight.
+    const env = D.night < 0.6 ? this.envTex : null;
+    if (this.scene.environment !== env) this.scene.environment = env;
+    if (Math.abs(D.night - this.lastNight) > 0.01) {
+      this.lastNight = D.night;
+      for (const st of FACADE_STYLES) { const m = MAT["facade_" + st] as THREE.MeshStandardMaterial; m.emissiveIntensity = m.userData.baseE + D.night * 1.4; }
+      (MAT.lamp as THREE.MeshStandardMaterial).emissiveIntensity = 1.6 + D.night * 2;
+      (MAT.pool as THREE.MeshBasicMaterial).opacity = D.night * 0.95;
     }
   }
 
@@ -1429,9 +1463,16 @@ export class RoadView {
       this.ghost.setOpacity?.(0.5 * smoothstep(3.5, 9, G.position.distanceTo(this.cam.position)));
     } else this.ghost.setOpacity?.(0);
 
+    // Time of day: sun height and colour, ambient, haze, exposure; at night lit windows, lamp pools and stars.
+    const D = daylightAt(hourFor(this.deps.settings().timeOfDay ?? "auto", f.timer));
     const sky = fwd.clone().applyAxisAngle(UP, 0.55);
-    this.sky.material.uniforms.sunPosition.value.set(sky.x, 0.11, sky.z).normalize();
-    const key = fwd.clone().applyAxisAngle(UP, 1.15), ld = V3(key.x * 0.82, 0.55, key.z * 0.82).normalize();
+    this.sky.material.uniforms.sunPosition.value.set(sky.x * Math.cos(D.sunElev), Math.sin(D.sunElev), sky.z * Math.cos(D.sunElev)).normalize();
+    // The key light is the sun by day and stands in for the moon (higher, dim and blue) at night.
+    const lightEl = THREE.MathUtils.lerp(Math.max(0.07, D.sunElev), 0.65, D.night);
+    const key = fwd.clone().applyAxisAngle(UP, 1.15), ld = V3(key.x * Math.cos(lightEl), Math.sin(lightEl), key.z * Math.cos(lightEl)).normalize();
+    this.applyDaylight(D);
+    this.nightLight.position.set(rp.x, rp.y + 6, rp.z).addScaledVector(fwd, 2);
+    this.nightLight.intensity = D.night * 140;
     // Centre the shadow box ahead of the rider, where the camera is looking, and snap it to whole
     // shadow texels so shadow edges don't shimmer as the rider moves.
     const sq = QUALITY[this.quality], ahead = rp.clone().addScaledVector(fwd, sq.shadowR * 0.6);
