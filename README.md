@@ -15,7 +15,7 @@ Built for one rider on a Samsung Galaxy Tab S7+ in Chrome, with a CYCPLUS speed/
 - **Challenges:** real climbs, plus a sprint or a 60-second cadence/speed hold every few kilometres. Inflatable arches, a 3-2-1 countdown, a gold rival on the road (a pacer, then your best), a live gap, and gold/silver/bronze medals with confetti, fanfare and XP towards your level.
 - **Badges and streaks:** 30 badges (distance, every stage, climbing, long rides, streaks, challenges), shown in History.
 - **Time of day:** your clock, sunrise, midday, sunset, night (lit towers, lamplight, stars), or a day passing as you ride.
-- **Night-hero mode:** ride as the Shadow Falcon, a masked hero in an armoured suit on a dark bike with a headlight that lights the road, at night under the falcon signal, against comic villains (Sandstorm, The Mirage, Doctor Dune, Captain Haboob, Scorpia, The Tar Baron) who ride in their colours, taunt you and complain when you pass. Chosen at startup or in Settings. All characters are original to this app.
+- **Night-hero mode:** ride as the Shadow Falcon, a masked hero in full armour on a dark bike with a headlight that lights the road, at night under the falcon signal, against comic villains (Sandstorm, The Mirage, Doctor Dune, Captain Haboob, Scorpia, The Tar Baron) who ride in their colours, taunt you and complain when you pass. Chosen at startup or in Settings. All characters are original to this app.
 - **Ghost:** replays your best ride second by second.
 - **Trustworthy data:**
   - Ride time comes from the clock, not the screen's frame rate, and distance from the sensor.
@@ -69,4 +69,4 @@ Both share the same origin, so the new app imports the old app's settings and ri
   - `lm_zayed_mosque.glb`: ["Sheikh Zayed Mosque"](https://sketchfab.com/3d-models/sheikh-zayed-mosque-67c1e0727de44c9082d5c8987e1ffb62) by rizariyaz145
   - `dhow.glb`: ["Low Poly Ancient Dhow Ship"](https://sketchfab.com/3d-models/low-poly-ancient-dhow-ship-f25b4552dce24d379833160dd217db84) by Nisa Nurul Azizah
   - `camel.glb`: ["camel"](https://sketchfab.com/3d-models/camel-44ef2ea4b50a49e395e5e3ebbdc99f98) by omarme37
-  - `hero_suit.glb` (the Shadow Falcon's suit): ["Jumpsuit Low Poly Game Ready (Striker14)"](https://sketchfab.com/3d-models/jumpsuit-low-poly-game-ready-striker14-da288adbddf949aa85962968732f0999) by DanlyVostok (animation removed; posed in code to ride the bike)
+  - `hero_body.glb` (the Shadow Falcon): ["Humanoid Avatar with Rig"](https://sketchfab.com/3d-models/humanoid-avatar-with-rig-995558e2514644909c9037b0e7762855) by 3DStory (animation removed, armour recoloured from blue to dark gunmetal; posed in code to ride the bike)

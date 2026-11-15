@@ -214,28 +214,6 @@ function jerseyMaterial(mesh: THREE.SkinnedMesh, kit: RiderKit) {
   return mat;
 }
 
-/** Only the hands of the cyclist's body, in black glove leather; the rest is not drawn. */
-function gloveMaterial(mesh: THREE.SkinnedMesh) {
-  const g = mesh.geometry, sk = mesh.skeleton, si = g.getAttribute("skinIndex"), sw = g.getAttribute("skinWeight");
-  const glove = sk.bones.map((b) => /(Left|Right)Hand/.test(b.name));
-  const mask = new Float32Array(si.count), get = [si.getX, si.getY, si.getZ, si.getW], getW = [sw.getX, sw.getY, sw.getZ, sw.getW];
-  for (let i = 0; i < si.count; i++) {
-    let m = 0;
-    for (let c = 0; c < 4; c++) if (glove[get[c].call(si, i)]) m += getW[c].call(sw, i);
-    mask[i] = m;
-  }
-  g.setAttribute("glove", new THREE.BufferAttribute(mask, 1));
-  const mat = new THREE.MeshStandardMaterial({ color: 0x141416, roughness: 0.45, metalness: 0.15, normalMap: (mesh.material as THREE.MeshStandardMaterial).normalMap });
-  mat.onBeforeCompile = (sh) => {
-    sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nattribute float glove;\nvarying float vGlove;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvGlove = glove;");
-    sh.fragmentShader = sh.fragmentShader.replace("#include <common>", "#include <common>\nvarying float vGlove;")
-      .replace("#include <clipping_planes_fragment>", "#include <clipping_planes_fragment>\nif (vGlove < 0.5) discard;");
-  };
-  mat.customProgramCacheKey = () => "glove";
-  return mat;
-}
-
 export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DEFAULT_KIT): RiderModel | null {
   // Villains ride as cyclists in their colours: kit in the suit colour, helmet in the trim colour, bike in theirs.
   const villain = kit.look && !kit.look.body && kit.look.bike === "villain" ? kit.look : undefined;
@@ -402,7 +380,7 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     }
   }
   /**
-   * Wear a rigged character: hide the cyclist's body (its skeleton keeps pedalling) and, every frame, turn each of the
+   * Wear a rigged character (the Shadow Falcon's armoured body): hide the cyclist's body (its skeleton keeps pedalling) and, every frame, turn each of the
    * character's bones to point the same way as the cyclist's, with the hips placed and turned to match.
    */
   function wear(suit: THREE.Object3D) {
@@ -410,21 +388,17 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     suit.traverse((o) => {
       if ((o as THREE.Bone).isBone) sb[o.name.replace(/^mixamorig:?/, "").replace(/_\d+$/, "")] = o as THREE.Bone;
       const m = o as THREE.Mesh;
-      if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; m.frustumCulled = false; if (/Cap/i.test(m.name)) m.visible = false; }
-      if (m.isMesh && /Glass/i.test(m.name)) m.material = new THREE.MeshBasicMaterial({ color: 0xffb020, toneMapped: false });
+      if (m.isMesh) {
+        m.castShadow = true; m.receiveShadow = true; m.frustumCulled = false;
+        const mat = (m.material as THREE.MeshStandardMaterial).clone();
+        mat.metalness = 0.55; mat.roughness = 0.42; // armour plate, not painted cloth
+        m.material = mat;
+      }
     });
     const need = ["Hips", "Spine", "LeftUpLeg", "LeftLeg", "LeftFoot", "RightUpLeg", "LeftArm", "LeftForeArm", "LeftHand"];
     if (need.some((n) => !sb[n] || !bodyBones[n])) return;
     for (const m of skinned) m.visible = false;
     helmet.visible = false;
-    // The suit has no hands: keep the cyclist's hands (they hold the grips) as black gloves.
-    body.visible = true;
-    body.material = gloveMaterial(body);
-    body.castShadow = false; // the shadow pass would draw the whole (hidden) body
-    // The suit has no neck either (its helmet perches on the collar): fill the gap with a dark neck piece.
-    const neckPiece = new THREE.Mesh(new THREE.CylinderGeometry(1, 1.15, 1, 16), new THREE.MeshStandardMaterial({ color: 0x0c0c0e, roughness: 0.6, metalness: 0.1 }));
-    neckPiece.castShadow = true;
-    scene.add(neckPiece);
     const wrap = new THREE.Group();
     wrap.add(suit);
     scene.add(wrap);
@@ -478,11 +452,9 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       for (const sd of ["Left", "Right"]) {
         const A = sb[sd + "Arm"], F = sb[sd + "ForeArm"], Hd = sb[sd + "Hand"], tgtB = bodyBones[sd + "Hand"];
         if (!A || !F || !Hd || !tgtB) continue;
-        // The suit's arms are shorter than the cyclist's: lengthen them as needed so the cuffs reach the gloved hands.
+        // If the character's arms are shorter than the cyclist's, lengthen them a little so the hands reach the grips.
         A.scale.setScalar(1); A.updateMatrixWorld(true);
-        // Its sleeves also end short of its hand bones (the model ships without hands), so aim that much past the wrist.
         const T = w(tgtB), S0 = w(A);
-        T.addScaledVector(T.clone().sub(S0).normalize(), 0.08);
         const reach = T.distanceTo(S0), full = w(A).distanceTo(w(F)) + w(F).distanceTo(w(Hd));
         if (reach > full * 0.96) { A.scale.setScalar(Math.min(1.5, reach / (full * 0.96))); A.updateMatrixWorld(true); }
         const S = w(A), K = w(F), Hp = w(Hd);
@@ -495,15 +467,6 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
         aim(A, K.sub(S), elbow.clone().sub(S));
         const K2 = w(F), H2 = w(Hd);
         aim(F, H2.sub(K2), T.sub(K2));
-      }
-      // Neck piece from inside the collar up into the helmet.
-      if (sb.Neck && sb.Head) {
-        const n0 = scene.worldToLocal(w(sb.Neck)), h0 = scene.worldToLocal(w(sb.Head));
-        // From the neck bone (inside the collar) to well up inside the helmet, which sits high above the head bone.
-        const s = wrap.scale.x, d = h0.clone().sub(n0).normalize(), top = h0.clone().addScaledVector(d, 0.19 * s), L = top.distanceTo(n0);
-        neckPiece.position.copy(n0).add(top).multiplyScalar(0.5);
-        neckPiece.quaternion.setFromUnitVectors(UP, d);
-        neckPiece.scale.set(0.058 * s, L, 0.064 * s);
       }
     });
   }

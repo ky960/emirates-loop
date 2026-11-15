@@ -13,9 +13,9 @@ import { makeWalkers, type Walker } from "./people";
 
 /** One piece of a model, baked into model space (metres, ground at y = 0, facing -Z). */
 export interface Part { geo: THREE.BufferGeometry; mat: THREE.Material; paint?: boolean; shadow?: boolean }
-export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[]; /** The Shadow Falcon's rigged suit (clone before use). */ heroSuit?: THREE.Object3D }
+export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[]; /** The Shadow Falcon's rigged, armoured body (clone before use). */ heroSuit?: THREE.Object3D }
 
-const FILES = { suit: "hero_suit.glb", palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
+const FILES = { suit: "hero_body.glb", palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
 /** Pedestrians (RenderPeople, CC BY 4.0); the first one carries the walk cycle. */
 const PEOPLE = ["ped_nathan.glb", "ped_eric.glb", "ped_claudia.glb"];
 
