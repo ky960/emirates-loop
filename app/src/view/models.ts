@@ -13,9 +13,9 @@ import { makeWalkers, type Walker } from "./people";
 
 /** One piece of a model, baked into model space (metres, ground at y = 0, facing -Z). */
 export interface Part { geo: THREE.BufferGeometry; mat: THREE.Material; paint?: boolean; shadow?: boolean }
-export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[]; /** The Shadow Falcon's rigged suit (clone before use). */ heroSuit?: THREE.Object3D }
+export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[]; /** The Shadow Falcon's rigged, armoured body (clone before use). */ heroSuit?: THREE.Object3D; /** Your rider: the scanned urban cyclist (build with buildScanRider). */ scanRider?: THREE.Object3D }
 
-const FILES = { suit: "hero_suit.glb", palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
+const FILES = { scan: "rider_scan.glb", suit: "hero_body.glb", palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
 /** Pedestrians (RenderPeople, CC BY 4.0); the first one carries the walk cycle. */
 const PEOPLE = ["ped_nathan.glb", "ped_eric.glb", "ped_claudia.glb"];
 
@@ -81,6 +81,60 @@ function fitHeight(root: THREE.Object3D, h: number) {
   return new THREE.Matrix4().makeRotationY(Math.PI).multiply(new THREE.Matrix4().makeScale(s, s, s)).multiply(new THREE.Matrix4().makeTranslation(-c.x, -bb.min.y, -c.z));
 }
 
+/**
+ * Some rigged models are bound to a skeleton of a different size than the one they ship with (the suit's mesh draws
+ * about 18% bigger than its bones), so a posed body ends up above the saddle with its hands off the bars. Measure the
+ * mismatch at rest (centroids of the body vertices weighted to each torso and leg bone against those bones) and fold
+ * the correction into the inverse bind matrices, so the mesh sits exactly on its skeleton however it is posed.
+ */
+function fitSkinToSkeleton(root: THREE.Object3D) {
+  root.updateMatrixWorld(true);
+  const skinned: THREE.SkinnedMesh[] = [];
+  root.traverse((o) => { if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned.push(o as THREE.SkinnedMesh); });
+  if (!skinned.length) return;
+  const body = skinned.reduce((a, b) => (a.geometry.getAttribute("position").count > b.geometry.getAttribute("position").count ? a : b));
+  const sk = body.skeleton;
+  sk.update();
+  const si = body.geometry.getAttribute("skinIndex"), sw = body.geometry.getAttribute("skinWeight"), v = new THREE.Vector3();
+  const sums = new Map<number, { c: THREE.Vector3; n: number }>();
+  for (let i = 0; i < si.count; i++) {
+    if (sw.getX(i) < 0.9) continue;
+    const b = si.getX(i);
+    if (!/(Hips|Spine|UpLeg|Leg)(_\d+)?$/.test(sk.bones[b].name)) continue;
+    body.getVertexPosition(i, v); body.localToWorld(v);
+    const e = sums.get(b) ?? { c: new THREE.Vector3(), n: 0 };
+    e.c.add(v); e.n++; sums.set(b, e);
+  }
+  // Pairs (mesh centroid, bone midpoint); fit bone = k * mesh + t by least squares.
+  const pairs: Array<[THREE.Vector3, THREE.Vector3]> = [];
+  for (const [b, e] of sums) {
+    if (e.n < 20) continue;
+    const bone = sk.bones[b], child = bone.children.find((c) => (c as THREE.Bone).isBone);
+    const a = bone.getWorldPosition(new THREE.Vector3());
+    pairs.push([e.c.divideScalar(e.n), child ? a.lerp(child.getWorldPosition(new THREE.Vector3()), 0.5) : a]);
+  }
+  if (pairs.length < 4) return;
+  const cm = new THREE.Vector3(), cb = new THREE.Vector3();
+  for (const [m, b] of pairs) { cm.add(m); cb.add(b); }
+  cm.divideScalar(pairs.length); cb.divideScalar(pairs.length);
+  let num = 0, den = 0;
+  for (const [m, b] of pairs) { const dm = m.clone().sub(cm); num += dm.dot(b.clone().sub(cb)); den += dm.lengthSq(); }
+  const k = num / den;
+  if (!(k > 0.5 && k < 2) || Math.abs(k - 1) < 0.02) return; // already fits (or the fit is nonsense)
+  const t = cb.clone().addScaledVector(cm, -k);
+  // T maps the mesh as drawn onto the skeleton; for each bone, boneInverse' = boneWorld^-1 * T * boneWorld * boneInverse.
+  const T = new THREE.Matrix4().makeTranslation(t.x, t.y, t.z).multiply(new THREE.Matrix4().makeScale(k, k, k));
+  const done = new Set<THREE.Matrix4>(); // skeletons can share their inverse matrices: correct each one once
+  for (const m of skinned) {
+    m.skeleton.bones.forEach((b, i) => {
+      const W = b.matrixWorld, inv = m.skeleton.boneInverses[i];
+      if (done.has(inv)) return;
+      inv.premultiply(W.clone().invert().multiply(T).multiply(W));
+      done.add(inv);
+    });
+  }
+}
+
 function tuneStd(mat: THREE.Material, f: (m: THREE.MeshStandardMaterial) => void) {
   if ((mat as THREE.MeshStandardMaterial).isMeshStandardMaterial) f(mat as THREE.MeshStandardMaterial);
 }
@@ -89,9 +143,10 @@ export async function loadModels(base: string): Promise<Models> {
   const L = new GLTFLoader();
   L.setMeshoptDecoder(MeshoptDecoder);
   const get = (f: string) => L.loadAsync(base + "models/" + f).catch((e) => { console.warn("model failed to load", f, e); return null; });
-  const [suit, palm, camry, patrol, cyclist, dhow, camel, ...people] = await Promise.all([get(FILES.suit), get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), get(FILES.dhow), get(FILES.camel), ...PEOPLE.map(get)]);
+  const [scan, suit, palm, camry, patrol, cyclist, dhow, camel, ...people] = await Promise.all([get(FILES.scan), get(FILES.suit), get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), get(FILES.dhow), get(FILES.camel), ...PEOPLE.map(get)]);
   const out: Models = { palmHeight: 7.34, cars: [], walkers: [] };
-  if (suit) out.heroSuit = suit.scene;
+  if (scan) out.scanRider = scan.scene;
+  if (suit) { fitSkinToSkeleton(suit.scene); out.heroSuit = suit.scene; }
   // Traditional dhow (~16 m) for the water near the road, and camels (~2.1 m) for the desert.
   if (dhow) { out.dhow = bake(dhow.scene, fit(dhow.scene, 16)); out.dhow.forEach((p) => (p.shadow = true)); }
   if (camel) { out.camel = bake(camel.scene, fitHeight(camel.scene, 2.1)); out.camel.forEach((p) => (p.shadow = true)); }

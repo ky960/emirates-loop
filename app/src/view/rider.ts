@@ -12,13 +12,12 @@ function orient(m: THREE.Object3D, a: THREE.Vector3, b: THREE.Vector3) {
 }
 
 /**
- * A character look for the detailed rider: a full suit, cape, headgear and bike. Used for the Shadow Falcon (an
+ * A character look for the detailed rider: a full suit, headgear and bike. Used for the Shadow Falcon (an
  * original night hero) and the villains who ride against him.
  */
 export interface Look {
   /** Full-body suit and its trim (shorts, gloves, boots). */
   suit: number; trim: number;
-  cape?: number; capeLining?: number;
   head: "cowl" | "horns" | "tophat" | "hood" | "crown";
   /** Glowing eyes or visor colour. */
   eyes?: number;
@@ -216,6 +215,9 @@ function jerseyMaterial(mesh: THREE.SkinnedMesh, kit: RiderKit) {
 }
 
 export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DEFAULT_KIT): RiderModel | null {
+  // Villains ride as cyclists in their colours: kit in the suit colour, helmet in the trim colour, bike in theirs.
+  const villain = kit.look && !kit.look.body && kit.look.bike === "villain" ? kit.look : undefined;
+  if (villain) kit = { jersey: villain.suit, panel: villain.trim, frame: villain.bikeColor };
   const scene = gltf.scene;
   const bones: Record<string, THREE.Bone> = {};
   const meshes: THREE.Mesh[] = [];
@@ -283,9 +285,17 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
   helmet.position.set(0, 0.098, -0.008);
   helmet.rotation.x = -0.14; // front edge up at the brow, back down over the nape
   scene.add(helmetPivot);
+  if (villain) {
+    (helmet.material as THREE.MeshStandardMaterial).color.set(villain.trim);
+    for (const m of meshes) {
+      if ((m as THREE.SkinnedMesh).isSkinnedMesh || wheels.some((w) => w.children.includes(m))) continue;
+      const mm = (m.material as THREE.MeshStandardMaterial).clone();
+      mm.color.set(villain.bikeColor); mm.metalness = 0.5; mm.roughness = 0.35;
+      m.material = mm;
+    }
+  }
   const look = kit.look;
   const followers: Array<() => void> = [];
-  let capeUpdate: ((dt: number, mps: number) => void) | null = null, jetUpdate: ((mps: number) => void) | null = null;
   const bodyBones = bones;
   if (look) dressUp(look);
 
@@ -357,70 +367,20 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       pv.add(em);
     }
     if (L.armor !== undefined && !L.body) armour(L.armor);
-    // Cape: cloth hanging from the shoulders, streaming back with speed.
-    if (L.cape !== undefined && bodyBones.Neck) {
-      const SEG_X = 6, SEG_Y = 10, geo = new THREE.PlaneGeometry(1, 1, SEG_X, SEG_Y);
-      const mats = [M(L.cape, { r: 0.7, m: 0 }), M(L.capeLining ?? L.cape, { r: 0.6, m: 0.1 })];
-      mats[0].side = THREE.BackSide; mats[1].side = THREE.FrontSide; // outside in the cape colour, lining inside
-      const cape = new THREE.Group(), front = new THREE.Mesh(geo, mats[0]), back = new THREE.Mesh(geo, mats[1]);
-      front.castShadow = true; cape.add(front, back);
-      scene.add(cape);
-      const pos = geo.getAttribute("position") as THREE.BufferAttribute, base = Float32Array.from(pos.array as Float32Array);
-      const neck = bodyBones.Neck, anchor = new THREE.Vector3(), down = new THREE.Vector3(), side = new THREE.Vector3(), nrm = new THREE.Vector3();
-      let t = 0;
-      capeUpdate = (dt: number, mps: number) => {
-        t += dt;
-        neck.getWorldPosition(anchor); scene.worldToLocal(anchor);
-        anchor.z -= 0.09; anchor.y -= 0.03; // just behind the shoulders
-        // Streams back from near vertical (standing) to almost flat at speed. Back is -Z (the model faces +Z).
-        const a = 0.25 + Math.min(1, mps / 11) * 1.05;
-        down.set(0, -Math.cos(a), -Math.sin(a)); side.set(1, 0, 0); nrm.crossVectors(side, down).normalize();
-        const flap = Math.min(1, mps / 6) * 0.07;
-        for (let i = 0; i < pos.count; i++) {
-          const u = base[i * 3], v = 0.5 - base[i * 3 + 1]; // u -0.5..0.5 across, v 0 (top) .. 1 (hem)
-          // Over a full suit the cape is narrower and shorter, so the suit still shows from behind.
-          const heavy = L.armor !== undefined && !L.body, w = L.body ? 0.3 + 0.26 * v : heavy ? 0.42 + 0.42 * v : 0.36 + 0.32 * v, len = L.body ? 0.95 : heavy ? 1.3 : 1.05;
-          const ripple = (Math.sin(t * 9 - v * 5 + u * 2) * flap * v + Math.sin(t * 4.3 + u * 6) * 0.015 * v) * (heavy ? 0.7 : 1);
-          const sag = v * v * 0.12 * (1 - Math.min(1, mps / 11));
-          pos.setXYZ(i, anchor.x + u * w, anchor.y + down.y * v * len - sag + nrm.y * ripple, anchor.z + down.z * v * len + nrm.z * ripple);
-        }
-        pos.needsUpdate = true;
-        geo.computeVertexNormals();
-      };
-    }
-    // Hero / villain bike parts, on the bike (model space: +Z is forward, wheels at z ±0.6, hubs at y 0.345).
-    const bm = M(L.bikeColor, { m: 0.8, r: 0.25 }), accent = M(L.eyes ?? 0xffc400, { m: 0.6, r: 0.3, e: 0.8, ec: L.eyes ?? 0xffa000 });
-    const nose = new THREE.Mesh(new THREE.SphereGeometry(0.2, 18, 12), bm);
-    nose.scale.set(0.55, 0.42, 1.35); nose.position.set(0, 0.8, 0.66); nose.castShadow = true; scene.add(nose);
-    // Swept tail fin over the back wheel, with a glowing edge.
-    const finShape = new THREE.Shape(); finShape.moveTo(0, 0); finShape.lineTo(-0.5, 0); finShape.quadraticCurveTo(-0.46, 0.2, -0.62, 0.38); finShape.quadraticCurveTo(-0.2, 0.18, 0, 0);
-    const finGeo = new THREE.ExtrudeGeometry(finShape, { depth: 0.025, bevelEnabled: false }).translate(0, 0, -0.0125).rotateY(-Math.PI / 2);
-    const fin = new THREE.Mesh(finGeo, bm); fin.position.set(0, 0.74, -0.3); fin.castShadow = true; scene.add(fin);
-    const edge = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.025, 0.42), accent); edge.position.set(0, 0.95, -0.72); edge.rotation.x = 0.62; scene.add(edge);
-    // Disc wheels with a glowing ring.
+    // The hero's bike: dark, with a thin glowing ring on each wheel, a headlight that lights the road and a tail light.
+    const accent = L.eyes ?? 0xffc400;
     for (const w of wheels) {
-      for (const sd of [-1, 1]) { const disc = new THREE.Mesh(new THREE.CircleGeometry(0.3, 28), bm); disc.position.x = sd * 0.03; disc.rotation.y = sd * Math.PI / 2; w.add(disc); }
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.012, 6, 36), glow(L.eyes ?? 0xffc400, 0.85)); ring.rotation.y = Math.PI / 2; w.add(ring);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.29, 0.006, 6, 48), glow(accent, 0.7)); ring.rotation.y = Math.PI / 2; w.add(ring);
     }
-    // Lights: headlight (with a beam for the hero), tail light, and jet glow that grows with speed.
-    const head = new THREE.Mesh(new THREE.CircleGeometry(0.05, 16), glow(0xfff2c0, 1)); head.position.set(0, 0.8, 0.935); scene.add(head);
-    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.03, 0.02), glow(0xff2030, 1)); tail.position.set(0, 0.86, -0.86); scene.add(tail);
+    const head = new THREE.Mesh(new THREE.CircleGeometry(0.03, 16), glow(0xfff2c0, 1)); head.position.set(0, 0.86, 0.66); scene.add(head);
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.02, 0.01), glow(0xff2030, 1)); tail.position.set(0, 0.8, -0.5); scene.add(tail);
     if (L.light) {
-      const beam = new THREE.Mesh(new THREE.ConeGeometry(1.6, 9, 24, 1, true), glow(0xfff2c0, 0.07));
-      beam.rotation.x = -Math.PI / 2; beam.position.set(0, 0.45, 5.4); scene.add(beam);
       const spot = new THREE.SpotLight(0xfff2c0, 60, 40, 0.45, 0.5, 1.4);
-      spot.position.set(0, 0.85, 0.9); spot.target.position.set(0, 0, 12); scene.add(spot, spot.target);
+      spot.position.set(0, 0.86, 0.7); spot.target.position.set(0, 0, 12); scene.add(spot, spot.target);
     }
-    const jets: THREE.Mesh[] = [];
-    for (const sd of [-1, 1]) {
-      const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, 0.22, 12), bm); pipe.rotation.x = Math.PI / 2; pipe.position.set(sd * 0.09, 0.62, -0.78); scene.add(pipe);
-      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.4, 12, 1, true), glow(L.bike === "hero" ? 0x58c8ff : 0xff6a20, 0.8));
-      flame.rotation.x = -Math.PI / 2; flame.position.set(sd * 0.09, 0.62, -1.0); scene.add(flame); jets.push(flame);
-    }
-    jetUpdate = (mps: number) => { const k = Math.min(1, mps / 12); for (const j of jets) { j.scale.set(0.6 + k * 0.6, 0.3 + k * (1.4 + Math.random() * 0.3), 0.6 + k * 0.6); j.position.z = -0.9 - j.scale.y * 0.2; } };
   }
   /**
-   * Wear a rigged character: hide the cyclist's body (its skeleton keeps pedalling) and, every frame, turn each of the
+   * Wear a rigged character (the Shadow Falcon's armoured body): hide the cyclist's body (its skeleton keeps pedalling) and, every frame, turn each of the
    * character's bones to point the same way as the cyclist's, with the hips placed and turned to match.
    */
   function wear(suit: THREE.Object3D) {
@@ -428,8 +388,12 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     suit.traverse((o) => {
       if ((o as THREE.Bone).isBone) sb[o.name.replace(/^mixamorig:?/, "").replace(/_\d+$/, "")] = o as THREE.Bone;
       const m = o as THREE.Mesh;
-      if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; m.frustumCulled = false; if (/Cap/i.test(m.name)) m.visible = false; }
-      if (m.isMesh && /Glass/i.test(m.name)) m.material = new THREE.MeshBasicMaterial({ color: 0xffb020, toneMapped: false });
+      if (m.isMesh) {
+        m.castShadow = true; m.receiveShadow = true; m.frustumCulled = false;
+        const mat = (m.material as THREE.MeshStandardMaterial).clone();
+        mat.metalness = 0.55; mat.roughness = 0.42; // armour plate, not painted cloth
+        m.material = mat;
+      }
     });
     const need = ["Hips", "Spine", "LeftUpLeg", "LeftLeg", "LeftFoot", "RightUpLeg", "LeftArm", "LeftForeArm", "LeftHand"];
     if (need.some((n) => !sb[n] || !bodyBones[n])) return;
@@ -445,33 +409,45 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     const legS = w(sb.LeftUpLeg).distanceTo(w(sb.LeftLeg)) + w(sb.LeftLeg).distanceTo(w(sb.LeftFoot));
     wrap.scale.multiplyScalar(legC / legS);
     scene.updateMatrixWorld(true);
+    // The bone that carries both the legs and the spine: usually Hips, but some rigs hang the spine off a root above it.
+    const carriesLegs = new Set<THREE.Object3D>();
+    for (let o: THREE.Object3D | null = sb.LeftUpLeg; o; o = o.parent) carriesLegs.add(o);
+    let pelvis: THREE.Object3D = sb.Hips;
+    for (let o: THREE.Object3D | null = sb.Spine; o; o = o.parent) if (carriesLegs.has(o)) { pelvis = o; break; }
     const rest = new Map<THREE.Bone, THREE.Quaternion>();
     Object.values(sb).forEach((b) => rest.set(b, b.quaternion.clone()));
     // Bone -> the child that gives its direction.
-    // (Neck and head keep the suit's own pose: its helmet sits on the collar as modelled.)
-    const chain: Array<[string, string]> = [["Spine", "Spine1"], ["Spine1", "Spine2"]];
+    const chain: Array<[string, string]> = [["Spine", "Spine1"], ["Spine1", "Spine2"], ["Spine2", "Neck"], ["Neck", "Head"]];
     for (const sd of ["Left", "Right"]) chain.push([sd + "Shoulder", sd + "Arm"], [sd + "Arm", sd + "ForeArm"], [sd + "ForeArm", sd + "Hand"], [sd + "Hand", sd + "HandMiddle1"], [sd + "UpLeg", sd + "Leg"], [sd + "Leg", sd + "Foot"], [sd + "Foot", sd + "ToeBase"]);
     const usable = chain.filter(([a, b]) => sb[a] && sb[b] && bodyBones[a] && bodyBones[b]);
     const pa = new THREE.Vector3(), pb = new THREE.Vector3(), dc = new THREE.Vector3(), ds = new THREE.Vector3();
     const q = new THREE.Quaternion(), qw = new THREE.Quaternion(), qp = new THREE.Quaternion(), m1 = new THREE.Matrix4(), m2 = new THREE.Matrix4();
     const frame = (hips: THREE.Object3D, spine: THREE.Object3D, l: THREE.Object3D, r: THREE.Object3D, out: THREE.Matrix4) => {
-      const up = w(spine).sub(w(hips)).normalize(), side = w(r).sub(w(l));
-      const fwd = new THREE.Vector3().crossVectors(side, up).normalize(), x = new THREE.Vector3().crossVectors(up, fwd).normalize();
-      return out.makeBasis(x, up, fwd);
+      // The line between the hip joints is exact; "up" only sets the pitch about it (spines vary between rigs).
+      const side = w(r).sub(w(l)).normalize(), up0 = w(spine).sub(w(hips));
+      const fwd = new THREE.Vector3().crossVectors(side, up0).normalize(), up = new THREE.Vector3().crossVectors(fwd, side).normalize();
+      return out.makeBasis(side, up, fwd);
     };
     followers.push(() => {
       for (const [b, rq] of rest) b.quaternion.copy(rq);
       wrap.updateMatrixWorld(true);
       // Hips: same place, same turn (from the hips->spine and left->right leg directions).
-      const H = sb.Hips;
+      const H = pelvis;
       const target = w(bodyBones.Hips);
+      // The worn body's "up" runs from its hips to its upper spine: some rigs put their first spine bone level with (or
+      // below) the hips. The cyclist's first spine bone sits squarely above its hips, and doesn't lean with the back.
       frame(bodyBones.Hips, bodyBones.Spine, bodyBones.LeftUpLeg, bodyBones.RightUpLeg, m1);
-      frame(H, sb.Spine, sb.LeftUpLeg, sb.RightUpLeg, m2);
+      frame(H, sb.Spine2 ?? sb.Spine, sb.LeftUpLeg, sb.RightUpLeg, m2);
       q.setFromRotationMatrix(m1).multiply(qp.setFromRotationMatrix(m2).invert());
       H.getWorldQuaternion(qw).premultiply(q);
       H.parent!.getWorldQuaternion(qp);
       H.quaternion.copy(qp.invert().multiply(qw));
       H.parent!.worldToLocal(H.position.copy(target));
+      H.updateMatrixWorld(true);
+      // Then shift so the hip joints (where the thighs start) line up: rigs differ in where they put the hips bone.
+      const midC = w(bodyBones.LeftUpLeg).add(w(bodyBones.RightUpLeg)).multiplyScalar(0.5);
+      const midS = w(sb.LeftUpLeg).add(w(sb.RightUpLeg)).multiplyScalar(0.5);
+      H.parent!.worldToLocal(H.position.copy(target).add(midC).sub(midS));
       H.updateMatrixWorld(true);
       // Every other bone: swing to point where the cyclist's does.
       for (const [a, b] of usable) {
@@ -489,11 +465,16 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       for (const sd of ["Left", "Right"]) {
         const A = sb[sd + "Arm"], F = sb[sd + "ForeArm"], Hd = sb[sd + "Hand"], tgtB = bodyBones[sd + "Hand"];
         if (!A || !F || !Hd || !tgtB) continue;
-        const S = w(A), K = w(F), Hp = w(Hd), T = w(tgtB);
+        // If the character's arms are shorter than the cyclist's, lengthen them a little so the hands reach the grips.
+        A.scale.setScalar(1); A.updateMatrixWorld(true);
+        const T = w(tgtB), S0 = w(A);
+        const reach = T.distanceTo(S0), full = w(A).distanceTo(w(F)) + w(F).distanceTo(w(Hd));
+        if (reach > full * 0.96) { A.scale.setScalar(Math.min(1.5, reach / (full * 0.96))); A.updateMatrixWorld(true); }
+        const S = w(A), K = w(F), Hp = w(Hd);
         const L1 = S.distanceTo(K), L2 = K.distanceTo(Hp), dir = T.clone().sub(S), d = THREE.MathUtils.clamp(dir.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
         dir.normalize();
         const a = Math.acos(THREE.MathUtils.clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
-        const pole = right.clone().multiplyScalar(sd === "Left" ? -1 : 1).add(down).normalize();
+        const pole = right.clone().multiplyScalar(sd === "Left" ? -0.35 : 0.35).add(down).normalize();
         pole.addScaledVector(dir, -pole.dot(dir)).normalize();
         const elbow = S.clone().addScaledVector(dir, L1 * Math.cos(a)).addScaledVector(pole, L1 * Math.sin(a));
         aim(A, K.sub(S), elbow.clone().sub(S));
@@ -576,6 +557,62 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     };
   });
   const spine = bones.Spine, spineQ = spine.quaternion.clone();
+
+  // Riding posture. The model sits bolt upright with straight arms; lean the back forward, bend the elbows so the
+  // hands stay on the grips, and lift the head to look down the road.
+  const upperNames = ["Spine1", "Spine2", "Neck", "Head", "LeftShoulder", "RightShoulder", "LeftArm", "RightArm", "LeftForeArm", "RightForeArm", "LeftHand", "RightHand"];
+  const upperRest = upperNames.filter((n) => bones[n]).map((n) => [bones[n], bones[n].quaternion.clone()] as const);
+  const sceneInv = scene.getWorldQuaternion(new THREE.Quaternion()).invert();
+  const arms = (["Left", "Right"] as const).flatMap((sd) => {
+    const A = bones[sd + "Arm"], F = bones[sd + "ForeArm"], Hd = bones[sd + "Hand"];
+    if (!A || !F || !Hd) return [];
+    // Grip position and hand turn in model space, from the rest pose (where the hands hold the bars).
+    return [{ A, F, Hd, side: sd === "Left" ? 1 : -1, grip: scene.worldToLocal(Hd.getWorldPosition(new THREE.Vector3())), handQ: Hd.getWorldQuaternion(new THREE.Quaternion()).premultiply(sceneInv) }];
+  });
+  /** Turn `bone` by `angle` about a world-space axis. */
+  const turn = (bone: THREE.Object3D, axis: THREE.Vector3, angle: number) => {
+    bone.getWorldQuaternion(_q2).premultiply(_q1.setFromAxisAngle(axis, angle));
+    bone.parent!.getWorldQuaternion(_q1);
+    bone.quaternion.copy(_q1.invert().multiply(_q2));
+    bone.updateMatrixWorld(true);
+  };
+  const lat = new THREE.Vector3(), up3 = new THREE.Vector3(), S3 = new THREE.Vector3(), K3 = new THREE.Vector3(), H3 = new THREE.Vector3(), T3 = new THREE.Vector3();
+  let t = 0;
+  function posture(mps: number, ck: number) {
+    for (const [b, q] of upperRest) b.quaternion.copy(q);
+    g.updateMatrixWorld(true);
+    lat.set(1, 0, 0).applyQuaternion(sceneQ); // the rider's left-right axis: turning about it tips the body forward
+    up3.set(0, 1, 0).applyQuaternion(sceneQ);
+    const speed = Math.min(1, mps / 10);
+    // Lean further forward with speed, breathe, and rock slightly with each pedal stroke.
+    const lean = 0.6 + 0.15 * speed + Math.sin(t * 1.6) * 0.012;
+    turn(spine, lat, lean * 0.45);
+    if (bones.Spine1) turn(bones.Spine1, lat, lean * 0.3);
+    if (bones.Spine2) { turn(bones.Spine2, lat, lean * 0.25); turn(bones.Spine2, up3, Math.sin(ck) * 0.05 * Math.min(1, mps / 5)); }
+    // Head up, eyes on the road (undo most of the lean), with a little bob.
+    if (bones.Neck) turn(bones.Neck, lat, -lean * 0.45);
+    if (bones.Head) turn(bones.Head, lat, -lean * 0.5 + Math.sin(ck * 2) * 0.012 * Math.min(1, mps / 5));
+    // Arms: two-bone IK from each shoulder to its grip, elbows bent out, down and back.
+    for (const a of arms) {
+      a.A.getWorldPosition(S3); a.F.getWorldPosition(K3); a.Hd.getWorldPosition(H3);
+      T3.copy(a.grip); scene.localToWorld(T3);
+      const L1 = S3.distanceTo(K3), L2 = K3.distanceTo(H3), dir = T3.clone().sub(S3);
+      const d = clamp(dir.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
+      dir.normalize();
+      const ang = Math.acos(clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
+      const pole = _v3.set(a.side * 0.7, -1, -0.45).normalize().applyQuaternion(sceneQ);
+      pole.addScaledVector(dir, -pole.dot(dir)).normalize();
+      const elbow = S3.clone().addScaledVector(dir, L1 * Math.cos(ang)).addScaledVector(pole, L1 * Math.sin(ang));
+      aim(a.A, K3.clone().sub(S3), elbow.clone().sub(S3));
+      a.F.getWorldPosition(K3); a.Hd.getWorldPosition(H3);
+      aim(a.F, H3.clone().sub(K3), T3.clone().sub(K3));
+      // Hand keeps its grip on the bar.
+      _q2.copy(sceneQ).multiply(a.handQ);
+      a.Hd.parent!.getWorldQuaternion(_q1);
+      a.Hd.quaternion.copy(_q1.invert().multiply(_q2));
+      a.Hd.updateMatrixWorld(true);
+    }
+  }
   const sceneQ = new THREE.Quaternion(), fwd = new THREE.Vector3(), tgt = new THREE.Vector3(), H = new THREE.Vector3(), K = new THREE.Vector3(), A = new THREE.Vector3();
 
   function update(dt: number, mps: number, ck: number) {
@@ -611,14 +648,206 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       l.foot.parent!.getWorldQuaternion(_q1);
       l.foot.quaternion.copy(_q1.invert().multiply(want));
     }
+    t += dt;
+    posture(mps, ck);
     // Helmet follows the head: same offset, turned by however far the head has rotated from its rest pose.
     const head = bones.Head;
     head.updateMatrixWorld(true);
     head.getWorldPosition(helmetPivot.position); scene.worldToLocal(helmetPivot.position);
     head.getWorldQuaternion(helmetPivot.quaternion).premultiply(_q1.copy(sceneQ).invert()).multiply(headBind);
     followers.forEach((f) => f());
-    capeUpdate?.(dt, mps);
-    jetUpdate?.(mps);
   }
+  return { g, update };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scanned rider: "Urban Cyclist With Backpack" by restore50 (CC BY 4.0), a photo-real scan of a rider on a city bike.
+// The scan is one solid piece, so its wheels and cranks were cut out when it was compressed; here they are rebuilt so
+// they turn, and the legs are skinned to a small skeleton (thigh, shin, foot) whose feet follow the pedals.
+
+/** Measured in the scan (metres; +Z forward, +X the rider's left, ground at y = -0.95). */
+const SCAN = {
+  ground: -0.95,
+  hubs: [-0.546, 0.572], hubY: -0.605, tyre: 0.345,
+  bb: new THREE.Vector3(0, -0.635, -0.085), crank: 0.17,
+  legs: {
+    // Hip, knee and ankle joint centres, and the ball of the foot (on the pedal) and the toe.
+    left: { hip: V3(0.1, 0.03, -0.22), knee: V3(0.15, -0.11, 0.13), ankle: V3(0.14, -0.38, -0.17), ball: V3(0.14, -0.5, -0.1), toe: V3(0.14, -0.55, -0.03) },
+    right: { hip: V3(-0.1, 0.03, -0.22), knee: V3(-0.16, -0.22, 0.035), ankle: V3(-0.135, -0.67, -0.105), ball: V3(-0.13, -0.765, 0), toe: V3(-0.13, -0.77, 0.07) },
+  },
+};
+
+const _a = new THREE.Vector3(), _b = new THREE.Vector3();
+/** Distance from p to the segment a-b, and how far along it (0..1) the nearest point is. */
+function segDist(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): [number, number] {
+  _a.subVectors(b, a); const t = clamp(_b.subVectors(p, a).dot(_a) / _a.lengthSq(), 0, 1);
+  return [_b.copy(a).addScaledVector(_a, t).distanceTo(p), t];
+}
+const smooth = (e0: number, e1: number, x: number) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+
+export function buildScanRider(src: THREE.Object3D): RiderModel | null {
+  let mesh: THREE.Mesh | undefined;
+  src.updateMatrixWorld(true);
+  src.traverse((o) => { if ((o as THREE.Mesh).isMesh && !mesh) mesh = o as THREE.Mesh; });
+  if (!mesh) return null;
+  const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
+  const pos = geo.getAttribute("position"), person = geo.getAttribute("_leg");
+  const n = pos.count;
+
+  // Bones: 0 static; then thigh, shin, foot for the right (1-3) and left (4-6) legs.
+  const sides = [{ key: "right" as const, sg: -1, phase: 0 }, { key: "left" as const, sg: 1, phase: Math.PI }];
+  // The foot "bone" runs from behind the heel (the heel sits behind the ankle) to the toe.
+  const heels = sides.map(({ key }) => { const L = SCAN.legs[key]; return L.ankle.clone().addScaledVector(L.ankle.clone().sub(L.toe).normalize(), 0.06); });
+  const skinIndex = new Uint16Array(n * 4), skinWeight = new Float32Array(n * 4);
+  const p = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    p.fromBufferAttribute(pos, i);
+    // Baked into the model: 0 for bike parts right next to the feet (chainstays, pedal remains), which must stay put.
+    const isRider = !person || person.getX(i) > 0.5;
+    let best = -1, wTh = 0, wSh = 0, wFt = 0, member = 0;
+    for (let s = 0; s < 2; s++) {
+      const L = SCAN.legs[sides[s].key];
+      if (!isRider || p.x * sides[s].sg < 0.03) continue; // the frame and the crotch stay put
+      const [dTh, tTh] = segDist(p, L.hip, L.knee), [dSh] = segDist(p, L.knee, L.ankle), [dFt] = segDist(p, heels[s], L.toe);
+      // Inside the leg: within a thigh, shin or foot's radius (fading out at the edge, so nearby bike parts stay still).
+      const m = Math.max(1 - smooth(0.12, 0.15, dTh), 1 - smooth(0.08, 0.1, dSh), 1 - smooth(0.11, 0.15, dFt));
+      if (m <= member) continue;
+      member = m; best = s;
+      const a = 1 / (dTh + 0.015) ** 4, b = 1 / (dSh + 0.015) ** 4, c = 1 / (dFt + 0.015) ** 4, sum = a + b + c;
+      // The top of the thigh blends into the (still) seat, so the shorts stretch rather than tear.
+      const hipFade = smooth(0.08, 0.45, tTh);
+      wTh = (a / sum) * hipFade; wSh = b / sum; wFt = c / sum;
+    }
+    const k = i * 4;
+    if (best < 0) { skinIndex[k] = 0; skinWeight[k] = 1; continue; }
+    const base = 1 + best * 3;
+    skinIndex[k] = 0; skinIndex[k + 1] = base; skinIndex[k + 2] = base + 1; skinIndex[k + 3] = base + 2;
+    const sw = 1 - member * (wTh + wSh + wFt);
+    skinWeight[k] = sw; skinWeight[k + 1] = member * wTh; skinWeight[k + 2] = member * wSh; skinWeight[k + 3] = member * wFt;
+  }
+  // Below the knees nothing joins the rider to the bike: drop triangles that bridge a moving foot or shin and a still
+  // part of the bike (scan leftovers such as the pedal under a sole), which would otherwise stretch into streaks.
+  const idx = geo.getIndex();
+  if (idx) {
+    const keep: number[] = [];
+    const moving = (v: number) => 1 - skinWeight[v * 4];
+    for (let t = 0; t < idx.count; t += 3) {
+      const a = idx.getX(t), b = idx.getX(t + 1), c = idx.getX(t + 2);
+      const lo = Math.min(moving(a), moving(b), moving(c)), hi = Math.max(moving(a), moving(b), moving(c));
+      if (hi - lo > 0.35 && Math.max(pos.getY(a), pos.getY(b), pos.getY(c)) < -0.25) continue;
+      keep.push(a, b, c);
+    }
+    geo.setIndex(keep);
+  }
+  geo.setAttribute("skinIndex", new THREE.Uint16BufferAttribute(skinIndex, 4));
+  geo.setAttribute("skinWeight", new THREE.Float32BufferAttribute(skinWeight, 4));
+
+  const g = new THREE.Group();
+  const inner = new THREE.Group();
+  inner.rotation.y = Math.PI; // the scan faces +Z; the scene expects -Z
+  g.add(inner);
+  const body = new THREE.Group();
+  body.position.y = -SCAN.ground; // ground to y = 0
+  inner.add(body);
+
+  const root = new THREE.Bone();
+  const bones: THREE.Bone[] = [root];
+  for (const s of sides) {
+    const L = SCAN.legs[s.key];
+    for (const j of [L.hip, L.knee, L.ankle]) { const b = new THREE.Bone(); b.position.copy(j); bones.push(b); }
+  }
+  for (const b of bones) body.add(b);
+  const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
+  mat.metalness = 0; mat.roughness = 0.75; mat.flatShading = false;
+  const skinned = new THREE.SkinnedMesh(geo, mat);
+  skinned.castShadow = true; skinned.receiveShadow = true; skinned.frustumCulled = false;
+  body.add(skinned);
+  body.updateMatrixWorld(true);
+  skinned.bind(new THREE.Skeleton(bones), skinned.matrixWorld);
+
+  // Wheels: dark tyres on black rims with thin spokes, turning on their hubs.
+  const tyreM = new THREE.MeshStandardMaterial({ color: 0x1a1a1c, roughness: 0.85 });
+  const rimM = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.4, metalness: 0.6 });
+  const spokeM = new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.35, metalness: 0.8 });
+  const wheels: THREE.Group[] = [];
+  for (const z of SCAN.hubs) {
+    const w = new THREE.Group();
+    w.position.set(0, SCAN.hubY, z);
+    const tyre = new THREE.Mesh(new THREE.TorusGeometry(SCAN.tyre - 0.021, 0.021, 10, 56), tyreM); tyre.rotation.y = Math.PI / 2;
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(SCAN.tyre - 0.045, 0.011, 6, 56), rimM); rim.rotation.y = Math.PI / 2;
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.1, 12), rimM); hub.rotation.z = Math.PI / 2;
+    w.add(tyre, rim, hub);
+    const spokeGeo = new THREE.CylinderGeometry(0.0018, 0.0018, SCAN.tyre - 0.06, 4).translate(0, (SCAN.tyre - 0.06) / 2, 0);
+    for (let k = 0; k < 28; k++) {
+      const sp = new THREE.Mesh(spokeGeo, spokeM);
+      sp.position.x = (k % 2 ? 1 : -1) * 0.02;
+      sp.rotation.x = (k / 28) * TAU;
+      w.add(sp);
+    }
+    w.traverse((o) => { o.castShadow = true; });
+    body.add(w);
+    wheels.push(w);
+  }
+
+  // Crankset: chainring on the right (drive) side, two arms and pedals, turning with the cadence.
+  const crankM = new THREE.MeshStandardMaterial({ color: 0x1f2023, roughness: 0.4, metalness: 0.7 });
+  const crank = new THREE.Group();
+  crank.position.copy(SCAN.bb);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.095, 0.006, 6, 40), crankM); ring.rotation.y = Math.PI / 2; ring.position.x = -0.05;
+  const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.003, 32), crankM); disc.rotation.z = Math.PI / 2; disc.position.x = -0.05;
+  const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.16, 10), crankM); axle.rotation.z = Math.PI / 2;
+  crank.add(ring, disc, axle);
+  for (const s of sides) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.028, SCAN.crank + 0.03), crankM);
+    // Arm points along +Z (forward) at crank angle 0 for the right side, backwards for the left.
+    const dir = s.phase === 0 ? 1 : -1;
+    arm.position.set(s.sg * 0.075, 0, (dir * SCAN.crank) / 2);
+    const pedal = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.022, 0.07), crankM);
+    pedal.position.set(s.sg * 0.125, 0, dir * SCAN.crank);
+    crank.add(arm, pedal);
+  }
+  crank.traverse((o) => { o.castShadow = true; });
+  body.add(crank);
+
+  // Leg IK: each foot's ball on its pedal, ankle a foot-length behind and above it, knee bent forward.
+  const legs = sides.map((s, i) => {
+    const L = SCAN.legs[s.key], [th, sh, ft] = [bones[1 + i * 3], bones[2 + i * 3], bones[3 + i * 3]];
+    const footLen = L.ankle.distanceTo(L.ball), l1 = L.hip.distanceTo(L.knee), l2 = L.knee.distanceTo(L.ankle);
+    const restTh = L.knee.clone().sub(L.hip).normalize(), restSh = L.ankle.clone().sub(L.knee).normalize(), restFt = L.ball.clone().sub(L.ankle).normalize();
+    return { ...s, L, th, sh, ft, footLen, l1, l2, restTh, restSh, restFt };
+  });
+  const ped = new THREE.Vector3(), ank = new THREE.Vector3(), knee = new THREE.Vector3(), dir = new THREE.Vector3(), pole = new THREE.Vector3(), tmp = new THREE.Vector3();
+
+  function update(dt: number, mps: number, ck: number) {
+    for (const w of wheels) w.rotation.x += (mps / SCAN.tyre) * dt;
+    crank.rotation.x = ck;
+    g.rotation.z = Math.sin(ck) * 0.008 * Math.min(1, mps / 2);
+    for (const l of legs) {
+      const th = ck + l.phase;
+      // The pedal turns forward-and-down from the front (as the crank arm above).
+      ped.set(l.sg * 0.125, SCAN.bb.y - SCAN.crank * Math.sin(th), SCAN.bb.z + SCAN.crank * Math.cos(th));
+      ped.y += 0.035; // ball of the foot sits on top of the pedal
+      // Foot pitch: ankle up and behind the ball, heel dropping a little on the downstroke.
+      const pitch = THREE.MathUtils.degToRad(132) + 0.22 * Math.sin(th);
+      ank.set(ped.x, ped.y + Math.sin(pitch) * l.footLen, ped.z + Math.cos(pitch) * l.footLen);
+      // Two-bone IK from the hip.
+      const H = l.L.hip;
+      dir.subVectors(ank, H);
+      const d = clamp(dir.length(), Math.abs(l.l1 - l.l2) + 1e-3, l.l1 + l.l2 - 1e-3);
+      dir.normalize();
+      const a = Math.acos(clamp((l.l1 * l.l1 + d * d - l.l2 * l.l2) / (2 * l.l1 * d), -1, 1));
+      pole.set(l.sg * 0.12, 0.15, 1).normalize(); // knees forward, a little out
+      pole.addScaledVector(dir, -pole.dot(dir)).normalize();
+      knee.copy(H).addScaledVector(dir, l.l1 * Math.cos(a)).addScaledVector(pole, l.l1 * Math.sin(a));
+      const ankle = tmp.copy(H).addScaledVector(dir, d);
+      l.th.position.copy(H);
+      l.th.quaternion.setFromUnitVectors(l.restTh, _v1.subVectors(knee, H).normalize());
+      l.sh.position.copy(knee);
+      l.sh.quaternion.setFromUnitVectors(l.restSh, _v1.subVectors(ankle, knee).normalize());
+      l.ft.position.copy(ankle);
+      l.ft.quaternion.setFromUnitVectors(l.restFt, _v1.subVectors(ped, ankle).normalize());
+    }
+  }
+  update(0, 0, 0);
   return { g, update };
 }

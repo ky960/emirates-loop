@@ -15,7 +15,7 @@ import { LANDMARKS, loadLandmark, loadModels, type Landmark, type Models, type P
 import { Pedestrians } from "./people";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { Bot } from "../ride/pack";
-import { buildModelRider, buildRider, DEFAULT_KIT, type Look, type RiderModel } from "./rider";
+import { buildModelRider, buildRider, buildScanRider, DEFAULT_KIT, type Look, type RiderModel } from "./rider";
 import { HERO } from "./characters";
 import { uaeFlagTexture } from "./textures";
 import { daylightAt, hourFor, lampPoolTexture, starField } from "./daylight";
@@ -1370,7 +1370,8 @@ export class RoadView {
     if (!MODELS?.cyclistSrc) return;
     this.heroOn = !!this.deps.settings().hero;
     const kit = this.heroOn ? { ...HERO, look: { ...HERO.look!, body: MODELS.heroSuit ? cloneSkinned(MODELS.heroSuit) : undefined } } : DEFAULT_KIT;
-    const mr = buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, kit);
+    // You ride as the scanned urban cyclist; the rigged cyclist stays for the hero and the other riders.
+    const mr = (!this.heroOn && MODELS.scanRider && buildScanRider(MODELS.scanRider)) || buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, kit);
     if (!mr) return;
     const old = this.rider.g;
     mr.g.position.copy(old.position); mr.g.rotation.copy(old.rotation);
