@@ -1370,8 +1370,9 @@ export class RoadView {
     if (!MODELS?.cyclistSrc) return;
     this.heroOn = !!this.deps.settings().hero;
     const kit = this.heroOn ? { ...HERO, look: { ...HERO.look!, body: MODELS.heroSuit ? cloneSkinned(MODELS.heroSuit) : undefined } } : DEFAULT_KIT;
-    // You ride as the scanned urban cyclist; the rigged cyclist stays for the hero and the other riders.
-    const mr = (!this.heroOn && MODELS.scanRider && buildScanRider(MODELS.scanRider)) || buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, kit);
+    // You ride as the scanned urban cyclist, in the Shadow Falcon's suit in night-hero mode.
+    const scanSuit = this.heroOn ? MODELS.falconSuit : undefined;
+    const mr = (MODELS.scanRider && (!this.heroOn || scanSuit) && buildScanRider(MODELS.scanRider, scanSuit)) || buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, kit);
     if (!mr) return;
     const old = this.rider.g;
     mr.g.position.copy(old.position); mr.g.rotation.copy(old.rotation);

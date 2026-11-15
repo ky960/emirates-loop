@@ -685,7 +685,120 @@ function segDist(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): [number,
 }
 const smooth = (e0: number, e1: number, x: number) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
 
-export function buildScanRider(src: THREE.Object3D): RiderModel | null {
+/**
+ * The Shadow Falcon's suit, painted onto the scan's own texture layout: a black suit with the scan's folds, a cowl with a
+ * glowing gold eye slit, a gold falcon on the chest, gold belt, piping and boot cuffs; the bike in gunmetal.
+ */
+export interface ScanSuit { map: THREE.Texture; glow: THREE.Texture }
+
+/** Smooth the scan's hair into a sleek cowl: relax the head above the brow, then point its normals outwards. */
+function cowlHead(geo: THREE.BufferGeometry) {
+  const pos = geo.getAttribute("position") as THREE.BufferAttribute, nrm = geo.getAttribute("normal") as THREE.BufferAttribute, idx = geo.getIndex();
+  if (!idx || !nrm) return;
+  const BROW = 0.775, n = pos.count;
+  // Weld UV-seam duplicates so the smoothing doesn't tear the surface apart.
+  const key = new Map<string, number>(), group = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = `${Math.round(pos.getX(i) * 1e4)},${Math.round(pos.getY(i) * 1e4)},${Math.round(pos.getZ(i) * 1e4)}`;
+    let gi = key.get(k); if (gi === undefined) { gi = key.size; key.set(k, gi); } group[i] = gi;
+  }
+  const G = key.size, gp = new Float32Array(G * 3), inHead = new Uint8Array(G), nb: number[][] = Array.from({ length: G }, () => []);
+  for (let i = 0; i < n; i++) { const g = group[i]; gp[g * 3] = pos.getX(i); gp[g * 3 + 1] = pos.getY(i); gp[g * 3 + 2] = pos.getZ(i); }
+  for (let g = 0; g < G; g++) inHead[g] = gp[g * 3 + 1] > BROW && Math.abs(gp[g * 3]) < 0.14 ? 1 : 0;
+  for (let t = 0; t < idx.count; t += 3) {
+    const a = group[idx.getX(t)], b = group[idx.getX(t + 1)], c = group[idx.getX(t + 2)];
+    if (!(inHead[a] || inHead[b] || inHead[c])) continue;
+    nb[a].push(b, c); nb[b].push(a, c); nb[c].push(a, b);
+  }
+  const tmp = new Float32Array(G * 3);
+  for (let it = 0; it < 14; it++) {
+    tmp.set(gp);
+    for (let g = 0; g < G; g++) {
+      if (!inHead[g] || !nb[g].length) continue;
+      // Fade in above the brow so the face below keeps its shape.
+      const w = 0.6 * smooth(BROW, BROW + 0.04, gp[g * 3 + 1]);
+      let sx = 0, sy = 0, sz = 0; for (const o of nb[g]) { sx += tmp[o * 3]; sy += tmp[o * 3 + 1]; sz += tmp[o * 3 + 2]; }
+      const k = nb[g].length;
+      gp[g * 3] += (sx / k - gp[g * 3]) * w; gp[g * 3 + 1] += (sy / k - gp[g * 3 + 1]) * w; gp[g * 3 + 2] += (sz / k - gp[g * 3 + 2]) * w;
+    }
+  }
+  // Centre of the cowl, for outward normals.
+  let cx = 0, cy = 0, cz = 0, cn = 0;
+  for (let g = 0; g < G; g++) if (inHead[g]) { cx += gp[g * 3]; cy += gp[g * 3 + 1]; cz += gp[g * 3 + 2]; cn++; }
+  if (!cn) return;
+  const c = new THREE.Vector3(cx / cn, cy / cn - 0.06, cz / cn), v = new THREE.Vector3(), o = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    const g = group[i]; if (!inHead[g]) continue;
+    pos.setXYZ(i, gp[g * 3], gp[g * 3 + 1], gp[g * 3 + 2]);
+    const w = smooth(BROW, BROW + 0.04, gp[g * 3 + 1]);
+    v.set(gp[g * 3], gp[g * 3 + 1], gp[g * 3 + 2]).sub(c).normalize();
+    o.fromBufferAttribute(nrm, i).lerp(v, w).normalize();
+    nrm.setXYZ(i, o.x, o.y, o.z);
+  }
+}
+
+/**
+ * The Shadow Falcon's cape, for the scanned rider (scan space: +Z forward). Each column of the cloth is a chain hung
+ * from the shoulders: every link points the way gravity and the wind of your speed pull it, then is pushed out of the
+ * rider's back, the bag on the rack and the rear wheel, so it slides down the back, drapes over the bag when slow
+ * and streams out behind at speed.
+ */
+function scanCape(parent: THREE.Object3D) {
+  const COLS = 10, ROWS = 18, LEN = 0.95;
+  const geo = new THREE.PlaneGeometry(1, 1, COLS, ROWS);
+  const outer = new THREE.MeshStandardMaterial({ color: 0x0b0b0e, roughness: 0.55, metalness: 0.1, side: THREE.BackSide });
+  const lining = new THREE.MeshStandardMaterial({ color: 0x4a3208, roughness: 0.5, metalness: 0.35, emissive: new THREE.Color(0x2a1800), emissiveIntensity: 0.6, side: THREE.FrontSide });
+  const a = new THREE.Mesh(geo, outer), b = new THREE.Mesh(geo, lining);
+  a.castShadow = true; a.frustumCulled = b.frustumCulled = false;
+  parent.add(a, b);
+  const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+  // Rider's back (it leans forward) and the bag on the rack.
+  const backZ = (y: number) => -0.157 - 0.455 * (0.62 - y);
+  const BAG = new THREE.Vector3(0, -0.005, -0.51), BR = new THREE.Vector3(0.27, 0.27, 0.215);
+  const p = new THREE.Vector3(), q = new THREE.Vector3(), d = new THREE.Vector3();
+  const chain = Array.from({ length: COLS + 1 }, () => Array.from({ length: ROWS + 1 }, () => new THREE.Vector3()));
+  let t = 0, lift = 0;
+  const solid = (v: THREE.Vector3) => {
+    // Out of the back (a little behind it), above the bag (an ellipsoid), above the rear wheel.
+    if (v.y > 0.05 && v.y < 0.66 && Math.abs(v.x) < 0.32) v.z = Math.min(v.z, backZ(v.y) - 0.03);
+    q.subVectors(v, BAG).divide(BR);
+    const r = q.length();
+    if (r < 1) v.copy(BAG).add(q.multiplyScalar(1 / Math.max(r, 1e-3)).multiply(BR));
+    if (v.z < -0.2) v.y = Math.max(v.y, -0.2);
+  };
+  return (dt: number, mps: number) => {
+    t += dt;
+    lift += (Math.min(1, mps / 12) - lift) * Math.min(1, dt * 2); // eases in and out, as cloth does
+    const flap = 0.04 + 0.16 * lift;
+    for (let c = 0; c <= COLS; c++) {
+      const u = c / COLS - 0.5, ch = chain[c];
+      // Collar: wraps round the shoulders behind the neck.
+      ch[0].set(u * 0.4, 0.625 - 0.045 * (2 * u) ** 2, -0.165 + 0.07 * (2 * u) ** 2);
+      for (let r = 1; r <= ROWS; r++) {
+        const v = r / ROWS;
+        const ang = 0.15 + 0.95 * lift + Math.sin(t * 7 - v * 7 + u * 4) * flap * v + Math.sin(t * 2.3 + u * 9) * 0.05 * v;
+        d.set(u * 0.12 * (1 + lift), -Math.cos(ang), -Math.sin(ang)).normalize();
+        p.copy(ch[r - 1]).addScaledVector(d, LEN / ROWS);
+        solid(p);
+        // Keep the link length after pushing it out.
+        p.sub(ch[r - 1]).setLength(LEN / ROWS).add(ch[r - 1]);
+        solid(p);
+        ch[r].copy(p);
+      }
+    }
+    for (let r = 0; r <= ROWS; r++) for (let c = 0; c <= COLS; c++) {
+      const v = r / ROWS, src = chain[c][r];
+      // Wider towards the hem.
+      // Wider towards the hem, and full in the middle: the cloth bellies out behind as the wind catches it.
+      const u = c / COLS - 0.5, spread = 1 + 0.9 * v, belly = (1 - (2 * u) ** 2) * Math.sin(Math.PI * Math.min(1, v * 1.4)) * (0.03 + 0.07 * lift);
+      pos.setXYZ(r * (COLS + 1) + c, src.x * spread, src.y + belly * 0.6, src.z - belly);
+    }
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+  };
+}
+
+export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel | null {
   let mesh: THREE.Mesh | undefined;
   src.updateMatrixWorld(true);
   src.traverse((o) => { if ((o as THREE.Mesh).isMesh && !mesh) mesh = o as THREE.Mesh; });
@@ -693,6 +806,7 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
   const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
   const pos = geo.getAttribute("position"), person = geo.getAttribute("_leg");
   const n = pos.count;
+  if (suit) cowlHead(geo);
 
   // Bones: 0 static; then thigh, shin, foot for the right (1-3) and left (4-6) legs.
   const sides = [{ key: "right" as const, sg: -1, phase: 0 }, { key: "left" as const, sg: 1, phase: Math.PI }];
@@ -759,6 +873,11 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
   for (const b of bones) body.add(b);
   const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
   mat.metalness = 0; mat.roughness = 0.75; mat.flatShading = false;
+  if (suit) {
+    // Satin suit fabric, with the eyes, emblem and trim lit from within.
+    mat.map = suit.map; mat.emissiveMap = suit.glow; mat.emissive = new THREE.Color(0xffffff); mat.emissiveIntensity = 1.6;
+    mat.roughness = 0.5; mat.metalness = 0.15;
+  }
   const skinned = new THREE.SkinnedMesh(geo, mat);
   skinned.castShadow = true; skinned.receiveShadow = true; skinned.frustumCulled = false;
   body.add(skinned);
@@ -767,6 +886,8 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
 
   // Wheels: dark tyres on black rims with thin spokes, turning on their hubs.
   const tyreM = new THREE.MeshStandardMaterial({ color: 0x1a1a1c, roughness: 0.85 });
+  // The hero's wheels carry a thin glowing gold ring.
+  const heroRing = suit ? new THREE.MeshBasicMaterial({ color: 0xffb020, toneMapped: false }) : undefined;
   const rimM = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.4, metalness: 0.6 });
   const spokeM = new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.35, metalness: 0.8 });
   const wheels: THREE.Group[] = [];
@@ -777,6 +898,7 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
     const rim = new THREE.Mesh(new THREE.TorusGeometry(SCAN.tyre - 0.045, 0.011, 6, 56), rimM); rim.rotation.y = Math.PI / 2;
     const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.1, 12), rimM); hub.rotation.z = Math.PI / 2;
     w.add(tyre, rim, hub);
+    if (heroRing) { const glowRing = new THREE.Mesh(new THREE.TorusGeometry(SCAN.tyre - 0.06, 0.004, 6, 64), heroRing); glowRing.rotation.y = Math.PI / 2; w.add(glowRing); }
     const spokeGeo = new THREE.CylinderGeometry(0.0018, 0.0018, SCAN.tyre - 0.06, 4).translate(0, (SCAN.tyre - 0.06) / 2, 0);
     for (let k = 0; k < 28; k++) {
       const sp = new THREE.Mesh(spokeGeo, spokeM);
@@ -818,7 +940,10 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
   });
   const ped = new THREE.Vector3(), ank = new THREE.Vector3(), knee = new THREE.Vector3(), dir = new THREE.Vector3(), pole = new THREE.Vector3(), tmp = new THREE.Vector3();
 
+  const capeUpdate = suit ? scanCape(body) : undefined;
+
   function update(dt: number, mps: number, ck: number) {
+    capeUpdate?.(dt, mps);
     for (const w of wheels) w.rotation.x += (mps / SCAN.tyre) * dt;
     crank.rotation.x = ck;
     g.rotation.z = Math.sin(ck) * 0.008 * Math.min(1, mps / 2);
