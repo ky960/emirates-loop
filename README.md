@@ -15,6 +15,7 @@ Built for one rider on a Samsung Galaxy Tab S7+ in Chrome, with a CYCPLUS speed/
 - **Challenges:** real climbs, plus a sprint or a 60-second cadence/speed hold every few kilometres. Inflatable arches, a 3-2-1 countdown, a gold rival on the road (a pacer, then your best), a live gap, and gold/silver/bronze medals with confetti, fanfare and XP towards your level.
 - **Badges and streaks:** 30 badges (distance, every stage, climbing, long rides, streaks, challenges), shown in History.
 - **Time of day:** your clock, sunrise, midday, sunset, night (lit towers, lamplight, stars), or a day passing as you ride.
+- **Night-hero mode:** ride as the Shadow Falcon, an original caped hero on an armoured hero bike (cape streaming with speed, glowing visor, headlight beam, jets), at night under the falcon signal, against comic villains (Sandstorm, The Mirage, Doctor Dune, Captain Haboob, Scorpia, The Tar Baron) who taunt you and complain when you pass. Chosen at startup or in Settings. All characters are original to this app.
 - **Ghost:** replays your best ride second by second.
 - **Trustworthy data:**
   - Ride time comes from the clock, not the screen's frame rate, and distance from the sensor.

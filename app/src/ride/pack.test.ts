@@ -49,3 +49,15 @@ describe("pack of other riders", () => {
     expect(t).toBeGreaterThan(a + 3);
   });
 });
+
+describe("pack cast", () => {
+  it("recasts riders as villains and back, keeping the group together", () => {
+    const p = new Pack(6, () => r);
+    p.cast({ solo: [{ name: "A", kit: 1 }, { name: "B", kit: 2 }, { name: "C", kit: 3 }], group: { names: ["G1", "G2", "G3"], kit: 9 } });
+    expect(p.bots.map((b) => b.name)).toEqual(["A", "B", "C", "G1", "G2", "G3"]);
+    expect(p.bots.filter((b) => b.kit === 9)).toHaveLength(3);
+    p.cast(null);
+    expect(p.bots[0].name).toBe("Ahmed");
+    expect(p.bots[3].kit).toBe(0x00732f);
+  });
+});

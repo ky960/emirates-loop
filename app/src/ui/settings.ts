@@ -60,6 +60,7 @@ export function renderSettings(el: HTMLElement, ctx: AppCtx) {
       ${sw("autoPause", "Auto-pause", "Stops the clock when you stop pedalling; pedal to carry on.")}
       ${sw("ghost", "Race your ghost", "Replays your best ride second by second.")}
       ${sw("sound", "Ride sound", "Wind, freewheel and a chime at each town.")}
+      ${sw("hero", "Ride as the Shadow Falcon", "Night-hero mode: a caped hero on an armoured bike, the city at night with the falcon signal in the sky, and the other riders as comic villains.")}
       ${sw("challenges", "Challenges", "Sprints, cadence holds and climbs every few kilometres, with your best times to beat. Simulated rides don't set records.")}
       ${sw("riders", "Other cyclists", "Riders to catch and some who come past. Tuck in close behind one for a slipstream: less drag, more speed.")}
       ${sw("traffic", "Traffic", "Cars on the road in the 3D view. Changes the next time the app opens.")}
@@ -115,6 +116,7 @@ export function renderSettings(el: HTMLElement, ctx: AppCtx) {
     if (k === "terrain") toast(i.checked ? "3D terrain on" : "3D terrain off");
     if (k === "sound") document.dispatchEvent(new CustomEvent("el:sound", { detail: i.checked }));
     if (k === "terrain") document.dispatchEvent(new CustomEvent("el:terrain"));
+    if (k === "hero") document.dispatchEvent(new CustomEvent("el:hero"));
   }));
   el.querySelectorAll<HTMLInputElement>("[data-n]").forEach((i) => i.addEventListener("change", () => {
     const k = i.dataset.n as keyof Settings, v = i.value === "" ? null : +i.value;

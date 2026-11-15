@@ -15,7 +15,8 @@ import { LANDMARKS, loadLandmark, loadModels, type Landmark, type Models, type P
 import { Pedestrians } from "./people";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { Bot } from "../ride/pack";
-import { buildModelRider, buildRider, DEFAULT_KIT, type RiderModel } from "./rider";
+import { buildModelRider, buildRider, DEFAULT_KIT, type Look, type RiderModel } from "./rider";
+import { HERO } from "./characters";
 import { uaeFlagTexture } from "./textures";
 import { daylightAt, hourFor, lampPoolTexture, starField } from "./daylight";
 import { barkTexture, blobTexture, facadeTextures, frondTexture, groundDetailTexture, kerbTexture, pavingTexture, wBeamTexture, type FacadeStyle } from "./textures";
@@ -657,6 +658,9 @@ export class RoadView {
   private nightLight!: THREE.PointLight;
   /** 3D riders for the other cyclists, by bot id; rebuilt as detailed models once those load. */
   private botModels = new Map<number, RiderModel>();
+  private botKeys = new Map<number, string>();
+  /** Night-hero mode: the falcon signal in the sky. */
+  private signal: THREE.Group | null = null;
   private people: Pedestrians | null = null;
   /** Where the current (or next) ride starts; the parking lot is built there. */
   private lotS = 0;
@@ -1227,15 +1231,7 @@ export class RoadView {
   private modelsArrived() {
     if (!this.ready) return;
     if (this.win && !this.building) this.building = { gen: this.buildWindow(this.win.m0), m0: this.win.m0 };
-    const mr = MODELS?.cyclist ? buildModelRider(MODELS.cyclist) : null;
-    if (mr) {
-      const old = this.rider.g;
-      mr.g.position.copy(old.position); mr.g.rotation.copy(old.rotation);
-      this.scene.remove(old);
-      mr.g.add(this.blob);
-      this.scene.add(mr.g);
-      this.rider = mr;
-    }
+    this.buildPlayer();
     // Other cyclists switch to the detailed rider model too.
     for (const m of this.botModels.values()) this.scene.remove(m.g);
     this.botModels.clear();
@@ -1249,6 +1245,45 @@ export class RoadView {
       this.traffic = new Traffic(QUALITY[this.quality].cars);
       this.scene.add(this.traffic.group);
     }
+  }
+
+  /** The falcon signal: a searchlight from the city lighting the emblem on the clouds, ahead and to the right. */
+  private heroSignal(on: boolean, rp: THREE.Vector3, fwd: THREE.Vector3) {
+    if (!on) { if (this.signal) this.signal.visible = false; return; }
+    if (!this.signal) {
+      const g = new THREE.Group();
+      const glow = (c: number, o: number) => new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: o, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, toneMapped: false, side: THREE.DoubleSide });
+      // Beam: from the ground up to the cloud.
+      const beamLen = 900, beam = new THREE.Mesh(new THREE.CylinderGeometry(70, 6, beamLen, 24, 1, true), glow(0xfff2c8, 0.05));
+      beam.name = "beam";
+      g.add(beam);
+      // The emblem on the cloud: a bright disc with the falcon wings in shadow.
+      const cv = document.createElement("canvas"); cv.width = cv.height = 512;
+      const c = cv.getContext("2d")!, gr = c.createRadialGradient(256, 256, 40, 256, 256, 256);
+      gr.addColorStop(0, "rgba(255,246,210,1)"); gr.addColorStop(0.6, "rgba(255,236,170,.85)"); gr.addColorStop(0.82, "rgba(255,220,140,.35)"); gr.addColorStop(1, "rgba(255,220,140,0)");
+      c.fillStyle = gr; c.fillRect(0, 0, 512, 512);
+      c.fillStyle = "rgba(10,10,14,.92)"; c.beginPath();
+      const W: Array<[number, number]> = [[0, -0.03], [0.09, 0.035], [0.05, 0.03], [0.075, 0.06], [0.02, 0.035], [0, 0.07], [-0.02, 0.035], [-0.075, 0.06], [-0.05, 0.03], [-0.09, 0.035]];
+      W.forEach(([x, y], i) => { const px = 256 + x * 2000, py = 280 - (y - 0.02) * 2000; if (i) c.lineTo(px, py); else c.moveTo(px, py); });
+      c.closePath(); c.fill();
+      const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+      const disc = new THREE.Mesh(new THREE.PlaneGeometry(260, 260), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.85, depthWrite: false, fog: false, toneMapped: false, side: THREE.DoubleSide }));
+      disc.name = "disc";
+      g.add(disc);
+      this.scene.add(g);
+      this.signal = g;
+    }
+    const g = this.signal;
+    g.visible = true;
+    const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+    const base = rp.clone().addScaledVector(fwd, 1000).addScaledVector(right, 900);
+    const top = rp.clone().addScaledVector(fwd, 1500).addScaledVector(right, 520); top.y = rp.y + 280;
+    const beam = g.getObjectByName("beam")!, disc = g.getObjectByName("disc")!;
+    beam.position.copy(base).lerp(top, 0.5);
+    beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), base.clone().sub(top).normalize());
+    beam.scale.y = base.distanceTo(top) / 900;
+    disc.position.copy(top);
+    disc.lookAt(rp.x, rp.y + 2, rp.z);
   }
 
   private lastNight = -1;
@@ -1279,8 +1314,12 @@ export class RoadView {
       const near = Math.abs(b.m - pos) < 160;
       let model = this.botModels.get(b.id);
       if (!near) { if (model) model.g.visible = false; continue; }
+      // Rebuild if the rider's been recast (villains on or off).
+      const key = `${b.kit}|${b.look ? (b.look as Look).head + (b.look as Look).suit : ""}`;
+      if (model && this.botKeys.get(b.id) !== key) { this.scene.remove(model.g); model = undefined; }
       if (!model) {
-        const kit = { ...DEFAULT_KIT, jersey: b.kit };
+        this.botKeys.set(b.id, key);
+        const kit = { ...DEFAULT_KIT, jersey: b.kit, look: b.look as Look | undefined };
         model = (MODELS?.cyclistSrc && buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, kit)) || buildRider(undefined, kit);
         model.g.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
         this.scene.add(model.g);
@@ -1292,6 +1331,22 @@ export class RoadView {
       model.g.rotation.set(Math.atan(gradeAt(prof, total, b.m)) * 0.9, Math.atan2(-t.x, -t.z), 0, "YXZ");
       model.update(dt, b.v, b.crank);
     }
+  }
+
+  private heroOn = false;
+  /** Your rider: the cyclist, or the Shadow Falcon in night-hero mode (once the detailed models have loaded). */
+  private buildPlayer() {
+    if (!MODELS?.cyclistSrc) return;
+    this.heroOn = !!this.deps.settings().hero;
+    const mr = buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, this.heroOn ? HERO : DEFAULT_KIT);
+    if (!mr) return;
+    const old = this.rider.g;
+    mr.g.position.copy(old.position); mr.g.rotation.copy(old.rotation);
+    mr.g.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
+    this.scene.remove(old);
+    mr.g.add(this.blob);
+    this.scene.add(mr.g);
+    this.rider = mr;
   }
 
   /** A landmark model finished downloading: rebuild the current window so it appears. */
@@ -1525,7 +1580,12 @@ export class RoadView {
     } else this.ghost.setOpacity?.(0);
 
     // Time of day: sun height and colour, ambient, haze, exposure; at night lit windows, lamp pools and stars.
-    const D = daylightAt(hourFor(this.deps.settings().timeOfDay ?? "auto", f.timer));
+    const hero = !!this.deps.settings().hero;
+    if (hero !== this.heroOn) this.buildPlayer();
+    // Night-hero mode: always a dark night, with a moody green-violet haze.
+    const D = daylightAt(hero ? 22.5 : hourFor(this.deps.settings().timeOfDay ?? "auto", f.timer));
+    if (hero) { D.haze.lerp(new THREE.Color(0x1d2433), 0.6); D.hemiSky.lerp(new THREE.Color(0x3a3f6a), 0.4); D.exposure *= 0.95; }
+    this.heroSignal(hero, rp, fwd);
     const sky = fwd.clone().applyAxisAngle(UP, 0.55);
     this.sky.material.uniforms.sunPosition.value.set(sky.x * Math.cos(D.sunElev), Math.sin(D.sunElev), sky.z * Math.cos(D.sunElev)).normalize();
     // The key light is the sun by day and stands in for the moon (higher, dim and blue) at night.

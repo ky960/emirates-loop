@@ -27,6 +27,8 @@ export interface Settings {
   riders: boolean;
   /** Sprints, holds and climbs along the route. */
   challenges: boolean;
+  /** Night-hero mode: ride as the Shadow Falcon on his hero bike, at night, against comic villains. */
+  hero: boolean;
   /** Sky and light in the road view: your clock, a fixed time, or a day passing as you ride. */
   timeOfDay: TimeOfDay;
   showPower: boolean;
@@ -56,6 +58,7 @@ export const DEFAULTS: Settings = {
   riders: true,
   challenges: true,
   timeOfDay: "auto",
+  hero: false,
   showPower: false,
   quality: "balanced",
   camera: "road",

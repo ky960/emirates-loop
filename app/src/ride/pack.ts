@@ -23,7 +23,12 @@ export interface Bot {
   /** Members of the group share a leader and keep their place behind it. */
   leader?: Bot;
   slot: number;
+  /** A character look (night-hero mode villains); plain kit when absent. */
+  look?: unknown;
 }
+
+/** A cast for the pack: names, kit colours and looks by rider, and one look for the group. */
+export interface Cast { solo: Array<{ name: string; kit: number; look?: unknown }>; group: { names: string[]; kit: number; look?: unknown } }
 
 const NAMES = ["Ahmed", "Fatima", "Omar", "Sara", "Khalid", "Maryam", "Yousef", "Noura", "Rashid", "Aisha", "Hamdan", "Layla"];
 const KITS = [0x1f6feb, 0xd7263d, 0x2ec4b6, 0xf4d35e, 0x6a4c93, 0x1b1b1f, 0xf2f2f2, 0x2a9d8f, 0xff7b00];
@@ -100,6 +105,19 @@ export class Pack {
       if (gap > 0.3 && gap < range && (!best || gap < best.gap)) best = { bot: b, gap };
     }
     return best;
+  }
+
+  private defaults: Array<{ name: string; kit: number }> | null = null;
+  /** Recast the riders (e.g. as villains), or back to ordinary cyclists with null. Positions are kept. */
+  cast(c: Cast | null) {
+    this.defaults ??= this.bots.map((b) => ({ name: b.name, kit: b.kit }));
+    let si = 0, gi = 0;
+    this.bots.forEach((b, i) => {
+      const d = this.defaults![i], grouped = d.kit === TEAM_KIT;
+      if (!c) { b.name = d.name; b.kit = d.kit; b.look = undefined; return; }
+      if (grouped) { b.name = c.group.names[gi++ % c.group.names.length]; b.kit = c.group.kit; b.look = c.group.look; }
+      else { const s = c.solo[si++ % c.solo.length]; b.name = s.name; b.kit = s.kit; b.look = s.look; }
+    });
   }
 
   reset() { this.ready = false; }
