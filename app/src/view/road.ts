@@ -1338,7 +1338,8 @@ export class RoadView {
   private buildPlayer() {
     if (!MODELS?.cyclistSrc) return;
     this.heroOn = !!this.deps.settings().hero;
-    const mr = buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, this.heroOn ? HERO : DEFAULT_KIT);
+    const kit = this.heroOn ? { ...HERO, look: { ...HERO.look!, body: MODELS.heroSuit ? cloneSkinned(MODELS.heroSuit) : undefined } } : DEFAULT_KIT;
+    const mr = buildModelRider({ scene: cloneSkinned(MODELS.cyclistSrc) as THREE.Group }, kit);
     if (!mr) return;
     const old = this.rider.g;
     mr.g.position.copy(old.position); mr.g.rotation.copy(old.rotation);
