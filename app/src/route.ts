@@ -5,7 +5,7 @@ import DATA from "./data/uae.json";
 
 export interface Leg { from: string; to: string; m0: number; m1: number }
 export interface Stop { name: string; m: number; stage: number; lnglat: LngLat }
-export interface Place { name: string; lnglat: LngLat; m?: number; kind: "city" | "poi" }
+export interface Place { name: string; lnglat: LngLat; m?: number; kind: "city" | "poi"; ar?: string; fact?: string; icon?: string }
 
 export interface Route {
   id: string;
@@ -34,12 +34,19 @@ export const CITY: Record<string, LngLat> = {
 export const CITY_AR: Record<string, string> = {
   "Abu Dhabi": "أبوظبي", Dubai: "دبي", Sharjah: "الشارقة", Fujairah: "الفجيرة", Hatta: "حتا", "Al Ain": "العين",
 };
-const POI: Array<[string, number, number]> = [
-  ["Yas Island", 54.6031, 24.4886],
-  ["Ghantoot", 54.827, 24.858],
-  ["Jebel Ali", 55.0272, 24.9857],
-  ["Dubai Marina", 55.1403, 25.0805],
-  ["Masafi", 56.172, 25.304],
+/** Landmarks along the loop (within 6 km of the road), with their Arabic names and one fact each. */
+const POI: Array<{ name: string; at: LngLat; ar: string; icon: string; fact: string }> = [
+  { name: "Yas Island", at: [54.6031, 24.4886], ar: "جزيرة ياس", icon: "🏎️", fact: "Home of the Yas Marina Circuit, where the Abu Dhabi Grand Prix ends the Formula 1 season, and the Ferrari World theme park." },
+  { name: "Ghantoot", at: [54.827, 24.858], ar: "غنتوت", icon: "🐎", fact: "The border between Abu Dhabi and Dubai, known for its polo and country club." },
+  { name: "Jebel Ali", at: [55.0272, 24.9857], ar: "جبل علي", icon: "⚓", fact: "Jebel Ali Port is the largest man-made harbour in the world and the busiest port in the Middle East." },
+  { name: "Dubai Marina", at: [55.1403, 25.0805], ar: "دبي مارينا", icon: "🛥️", fact: "A man-made canal city lined with some of the world's tallest residential towers." },
+  { name: "Burj Al Arab", at: [55.1853, 25.1412], ar: "برج العرب", icon: "⛵", fact: "The sail-shaped hotel stands 321 m tall on its own island, 280 m off Jumeirah Beach." },
+  { name: "Burj Khalifa", at: [55.2744, 25.1972], ar: "برج خليفة", icon: "🏙️", fact: "At 828 m, the tallest building in the world since 2010, with more than 160 storeys." },
+  { name: "Dubai Creek", at: [55.309, 25.26], ar: "خور دبي", icon: "🚤", fact: "The old heart of Dubai, where wooden abras still ferry people across for a single dirham." },
+  { name: "Masafi", at: [56.172, 25.304], ar: "مسافي", icon: "💧", fact: "A mountain town in the Hajar, famous for its spring water and its Friday market." },
+  { name: "Hatta Dam", at: [56.1235, 24.8169], ar: "سد حتا", icon: "🛶", fact: "A turquoise reservoir in the Hajar mountains, popular for kayaking between the rocky peaks." },
+  { name: "Al Ain Oasis", at: [55.7577, 24.2186], ar: "واحة العين", icon: "🌴", fact: "A UNESCO World Heritage Site with about 147,000 date palms, watered by ancient falaj channels." },
+  { name: "Sheikh Zayed Grand Mosque", at: [54.4749, 24.4129], ar: "جامع الشيخ زايد الكبير", icon: "🕌", fact: "One of the largest mosques in the world, with 82 white marble domes and one of the largest hand-knotted carpets." },
 ];
 export const LOOP_WAYPOINTS = ["Abu Dhabi", "Dubai", "Sharjah", "Fujairah", "Hatta", "Al Ain", "Abu Dhabi"];
 
@@ -56,13 +63,13 @@ function finish(r: { id: string; name: string; kind: Route["kind"]; loop: boolea
   route.stops = legs.map((l, i) => ({ name: l.to, m: l.m1, stage: i + 1, lnglat: pointAt(route, l.m1 - 0.01).p }));
   if (r.loop && r.kind !== "gpx") {
     route.places = Object.entries(CITY).map(([name, lnglat]) => ({ name, lnglat, kind: "city" as const }));
-    for (const [name, x, y] of POI) {
+    for (const p of POI) {
       let best = 0, bd = 1e12;
       for (let i = 0; i < n; i += 4) {
-        const d = hav(r.pts[i], [x, y]);
+        const d = hav(r.pts[i], p.at);
         if (d < bd) { bd = d; best = cum[i]; }
       }
-      if (bd < 6000) route.places.push({ name, lnglat: [x, y], m: best, kind: "poi" });
+      if (bd < 6000) route.places.push({ name: p.name, lnglat: p.at, m: best, kind: "poi", ar: p.ar, fact: p.fact, icon: p.icon });
     }
   } else {
     route.places = [

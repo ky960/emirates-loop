@@ -4,7 +4,7 @@ import { climbBetween, demProfile, gradeAt, flatProfile, gpxProfile, processProf
 import { RideEngine, type Frame, type RideState } from "./ride/engine";
 import { Ghost, pickBest } from "./ride/ghost";
 import { Pack } from "./ride/pack";
-import { ChallengeRunner, fmtSecs, localChallengeStore, planChallenges, xpLevel, type Challenge, type Medal } from "./ride/challenges";
+import { ChallengeRunner, fmtSecs, LANDMARK_XP, landmarkLog, localChallengeStore, planChallenges, recordLandmark, xpLevel, type Challenge, type Medal } from "./ride/challenges";
 import { powerFor, speedFor } from "./physics";
 import type { Bot } from "./ride/pack";
 import { Confetti } from "./ui/confetti";
@@ -63,7 +63,7 @@ let rivalOn = false;
 // Badges: announce any newly earned (after a saved ride or a completed challenge), one banner at a time.
 let knownBadges: Badge[] | null = null;
 function checkBadges() {
-  const now = badges(rides, route, challengeStore.log());
+  const now = badges(rides, route, challengeStore.log(), Date.now(), landmarkLog().map((e) => e.name));
   const fresh = knownBadges ? newlyEarned(knownBadges, now) : [];
   knownBadges = now;
   fresh.forEach((b, i) => setTimeout(() => { showBanner("Badge earned", `${b.icon} ${b.title}`, b.desc, 5000); audio.chime(); }, i * 5500));
@@ -249,7 +249,7 @@ async function selectRoute(force = false) {
   if (engine.active) { pendingRoute = next; return; }
   route = next;
   profile = await loadProfile(route);
-  knownBadges = badges(rides, route, challengeStore.log()); // stage ends moved with the route: re-baseline quietly
+  knownBadges = badges(rides, route, challengeStore.log(), Date.now(), landmarkLog().map((e) => e.name)); // stage ends moved with the route: re-baseline quietly
   mapView.setRoute(route);
   fetchElevation(route);
   setCam(camMode);
@@ -396,6 +396,7 @@ function zoneBar(z: number[]): string {
 
 engine.on("state", (s: RideState) => {
   document.body.classList.toggle("riding", s !== "idle");
+  document.body.classList.toggle("paused", s === "paused" || s === "autopaused");
   $("pausedOv").hidden = !(s === "paused" || s === "autopaused");
   $("pausedSub").textContent = s === "autopaused" ? "Pedal to resume" : "Tap Resume to continue";
   renderControls();
@@ -411,15 +412,29 @@ engine.on("state", (s: RideState) => {
 engine.on("autostart", () => toast("Ride started · pedalling detected"));
 engine.on("checkpoint", (cp) => { db.set("active", cp).catch(() => {}); });
 let bannerUntil = 0;
-function showBanner(label: string, big: string, sub: string, ms = 5000) {
+function showBanner(label: string, big: string, sub: string, ms = 5000, fact = "") {
+  $("bFact").hidden = !fact;
+  $("bFact").textContent = fact;
+  $("banner").classList.toggle("withfact", !!fact);
   $("bLbl").textContent = label;
   $("bName").textContent = big;
   $("bSub").textContent = sub;
   $("bSub").hidden = !sub;
   bannerUntil = performance.now() + ms;
 }
+// Landmarks: an arrival moment with a fact, a little celebration and XP (once per landmark per day on real rides).
+engine.on("landmark", (pl) => {
+  const today = new Date().toDateString(), seenToday = landmarkLog().some((e) => e.name === pl.name && new Date(e.at).toDateString() === today);
+  const real = !engine.current.sim, xp = real && !seenToday;
+  showBanner("Now passing", `${pl.icon ?? "📍"} ${pl.name}`, xp ? `+${LANDMARK_XP} XP` : pl.ar ?? "", 9000, pl.fact ?? "");
+  if (pl.ar && xp) { const s2 = $("bSub"); s2.textContent = `${pl.ar} · +${LANDMARK_XP} XP`; }
+  audio.chime();
+  confetti.burst(70, ["#c8873a", "#f2d6a2", "#ffffff", "#00732f", "#ff0000"]);
+  if (settings.hero) burst("ZOOM!");
+  if (real) { recordLandmark(pl.name); setTimeout(checkBadges, 9500); }
+});
 engine.on("arrival", (st) => {
-  $("bLbl").textContent = "Now arriving"; $("bSub").hidden = false;
+  $("bLbl").textContent = "Now arriving"; $("bSub").hidden = false; $("bFact").hidden = true;
   $("bName").textContent = st.name;
   $("bSub").textContent = route.loop && route.kind !== "gpx" ? `Stage ${st.stage} of ${route.legs.length} complete` : "Route complete";
   bannerUntil = performance.now() + 6000;
@@ -502,7 +517,7 @@ function celebrate(medal: Medal, kind: string, time: string, note: string, xp: n
   $("medalNote").textContent = note;
   // XP and level, counting this ride's distance too.
   const km = rides.reduce((a, r) => a + r.dist, 0) / 1000 + engine.current.dist / 1000;
-  const L = engine.current.sim ? null : xpLevel(challengeStore.log(), km);
+  const L = engine.current.sim ? null : xpLevel(challengeStore.log(), km, landmarkLog().length);
   $("medalXp").textContent = engine.current.sim ? "Simulated · no XP" : `+${xp} XP`;
   const bar = $("medalXpBar");
   bar.style.width = L ? `${Math.max(0, ((L.into - xp) / L.need) * 100)}%` : "0";

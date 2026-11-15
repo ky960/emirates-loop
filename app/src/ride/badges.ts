@@ -27,7 +27,7 @@ export function streak(rides: RideRecord[], now = Date.now()): { current: number
   return { current, best };
 }
 
-export function badges(rides: RideRecord[], route: Route, log: ChallengeLogEntry[], now = Date.now()): Badge[] {
+export function badges(rides: RideRecord[], route: Route, log: ChallengeLogEntry[], now = Date.now(), sights: string[] = []): Badge[] {
   const km = rides.reduce((a, r) => a + r.dist, 0) / 1000;
   const climb = rides.reduce((a, r) => a + (r.climb || 0), 0);
   const longest = Math.max(0, ...rides.map((r) => r.dist / 1000));
@@ -76,6 +76,9 @@ export function badges(rides: RideRecord[], route: Route, log: ChallengeLogEntry
   goal("holds5", "🎚️", "Steady", "Complete 5 holds", holds, 5);
   out.push({ id: "pb", icon: "⚡", title: "Personal best", desc: "Beat your time on a sprint or climb", earned: improved });
 
+  const seen = new Set(sights), all = route.places.filter((p) => p.kind === "poi").length;
+  goal("sights3", "📸", "Sightseer", "Reach 3 landmarks", seen.size, 3);
+  if (all) goal("sightsAll", "🗺️", "Tour guide", "Reach every landmark on the loop", seen.size, all);
   const hours = rides.map((r) => new Date(r.start).getHours());
   out.push({ id: "early", icon: "🌅", title: "Early bird", desc: "Start a ride before 7 am", earned: hours.some((h) => h < 7 && h >= 3) });
   out.push({ id: "night", icon: "🌙", title: "Night owl", desc: "Start a ride after 9 pm", earned: hours.some((h) => h >= 21 || h < 3) });
