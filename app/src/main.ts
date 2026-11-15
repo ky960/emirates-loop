@@ -8,6 +8,7 @@ import { ChallengeRunner, fmtSecs, localChallengeStore, planChallenges, xpLevel,
 import { powerFor, speedFor } from "./physics";
 import type { Bot } from "./ride/pack";
 import { Confetti } from "./ui/confetti";
+import { BURSTS, GANG, HERO_NAME, VILLAINS } from "./view/characters";
 import { badges, newlyEarned, type Badge } from "./ride/badges";
 import { ZONE_COLORS, ZONE_NAMES } from "./ride/metrics";
 import type { RideRecord } from "./ride/types";
@@ -136,6 +137,12 @@ async function chooseStart() {
   const act = await sheet(html`
     <h2>Choose your ride</h2>
     <p class="muted">${route.name} · ${km(route.total)} km in ${route.legs.length} stage${route.legs.length > 1 ? "s" : ""}${route.loop && cont >= route.total ? ` · lap ${Math.floor(cont / route.total) + 1}` : ""}</p>
+    <div class="rideas">
+      <span class="label">Ride as</span>
+      <button class="btn sm ${settings.hero ? "ghost" : "primary"}" data-act="as:cyclist">🚴 Cyclist</button>
+      <button class="btn sm hero ${settings.hero ? "primary" : "ghost"}" data-act="as:hero">🦅 ${HERO_NAME}</button>
+      <small class="muted">${settings.hero ? "Night falls, the falcon signal lights the sky, and the villains are out." : "Ride as a caped night hero against comic villains."}</small>
+    </div>
     <button class="btn primary continue" data-act="continue">
       <span>${cont > 0 ? "Continue" : "Start the journey"}</span>
       <small>${cont > 0 ? `${here.from} → ${here.to} · ${km(cont - lapBase - here.m0)} of ${km(here.m1 - here.m0)} km` : `${route.legs[0].from} → ${route.legs[0].to}`}</small>
@@ -147,6 +154,7 @@ async function chooseStart() {
         <button class="btn sm ${i === picked ? "primary" : "ghost"}" data-act="stage:${i}">${i === picked ? "Chosen" : "Start here"}</button></div>`;
     })}</div>
     <p class="muted" style="font-size:14px">Rides always count toward your history. After a ride you saved, "Continue" picks up where it ended.</p>`);
+  if (act?.startsWith("as:")) { setHero(act === "as:hero"); return chooseStart(); }
   if (act === "continue") {
     saveStartAt(null);
     toast(cont > 0 ? `Continuing ${here.from} → ${here.to}` : `Starting ${route.legs[0].from} → ${route.legs[0].to}`);
@@ -154,6 +162,49 @@ async function chooseStart() {
     const l = route.legs[+act.slice(6)];
     saveStartAt({ routeId: route.id, leg: +act.slice(6), lap: route.loop ? Math.round(lapBase / route.total) : 0 });
     toast(`Next ride starts at the beginning of ${l.from} → ${l.to}`);
+  }
+}
+
+// ===================== night-hero mode =====================
+/** Switch the Shadow Falcon mode on or off: your rider, the villains, the challenge rivals and the night. */
+function setHero(on: boolean) {
+  settings.hero = on;
+  saveSettings(settings);
+  applyHero();
+}
+function applyHero() {
+  const on = settings.hero;
+  pack.cast(on ? {
+    solo: VILLAINS.map((v) => ({ name: v.name, kit: v.look.suit, look: v.look })),
+    group: { names: ["Sandstorm's goon", "Dusty", "Grit"], kit: GANG.look.suit, look: { ...GANG.look, head: "hood", cape: undefined } },
+  } : null);
+  runner.pacers = on ? VILLAINS.map((v) => v.name) : ["Rashid", "Mariam", "Saeed", "Hessa", "Majid", "Shamma"];
+  document.body.classList.toggle("hero", on);
+}
+const villainOf = (name: string) => VILLAINS.find((v) => v.name === name);
+const pick = <T>(a: T[]) => a[Math.floor(Math.random() * a.length)];
+/** A comic-book sound burst on screen. */
+function burst(word = pick(BURSTS)) {
+  const el = $("comic");
+  el.textContent = word;
+  el.style.setProperty("--rot", `${Math.round((Math.random() - 0.5) * 24)}deg`);
+  el.style.left = `${30 + Math.random() * 40}%`;
+  el.classList.remove("show"); void el.offsetWidth; el.classList.add("show");
+}
+// Villains taunt you when they pass and complain when you pass them (once a minute at most).
+const passSide = new Map<number, number>();
+let lastTaunt = 0;
+function villainBanter(f: Frame) {
+  if (!settings.hero || !settings.riders || f.state !== "riding") { passSide.clear(); return; }
+  const now = performance.now();
+  for (const b of pack.bots) {
+    const gap = b.m - f.pos, side = Math.sign(gap), prev = passSide.get(b.id);
+    passSide.set(b.id, side);
+    if (prev === undefined || prev === side || Math.abs(gap) > 12 || now - lastTaunt < 45000) continue;
+    const v = villainOf(b.name);
+    lastTaunt = now;
+    if (side < 0) { burst(); toast(`${b.name}: “${v ? pick(v.beaten) : "Nooo!"}”`, 3200); audio.whoosh(); }
+    else toast(`${b.name}: “${v ? pick(v.taunts) : "Too slow!"}”`, 3200);
   }
 }
 
@@ -425,6 +476,7 @@ $("simStop").addEventListener("click", stopSim);
 document.addEventListener("pointerdown", () => audio.unlock(), { once: true });
 document.addEventListener("el:sound", (e) => audio.setEnabled((e as CustomEvent<boolean>).detail));
 document.addEventListener("el:terrain", () => mapView.applyTerrain());
+document.addEventListener("el:hero", () => applyHero());
 
 // ===================== challenges =====================
 let chalStatus: ReturnType<ChallengeRunner["update"]>["status"] = null, lastTimer = 0, nextBeat = 0;
@@ -460,6 +512,7 @@ function celebrate(medal: Medal, kind: string, time: string, note: string, xp: n
   setTimeout(() => (m.hidden = true), 5200);
   const fl = $("flash"); fl.classList.remove("on"); void fl.offsetWidth; fl.classList.add("on");
   confetti.burst(lvl === 3 ? 260 : lvl === 2 ? 160 : 90, lvl === 3 ? ["#ffc400", "#fff3b0", "#ff8a3d", "#00732f", "#ffffff", "#ff0000"] : undefined);
+  if (settings.hero) { burst(medal === "gold" ? "KAPOW!" : medal === "silver" ? "WHAM!" : "BAM!"); setTimeout(() => burst(), 650); }
   audio.fanfare(lvl);
   road.celebrate(4);
 }
@@ -474,6 +527,8 @@ function challengeFrame(_dt: number, f: Frame) {
   // Rival on the road, racing you.
   rivalOn = !!live?.rivalM;
   if (live?.rivalM !== undefined) {
+    const v = settings.hero ? villainOf(rivalBot.name) ?? VILLAINS[1] : undefined;
+    rivalBot.look = v?.look; rivalBot.kit = v ? v.look.suit : 0xffc400;
     const was = rivalBot.m;
     rivalBot.m = live.rivalM;
     rivalBot.v = Math.max(0, Math.min(25, (rivalBot.m - was) / Math.max(1 / 60, _dt)));
@@ -496,10 +551,12 @@ function challengeFrame(_dt: number, f: Frame) {
     } else if (e.type === "countdown") countdown(e.n);
     else if (e.type === "start") {
       countdown(0);
+      rivalBot.name = e.rival ? (e.rival.isBest ? (settings.hero ? "The Mirage" : "Rival") : e.rival.name) : "Rival";
       if (e.target) showBanner(kind, "Hold it!", e.target, 2500);
     } else if (e.type === "overtake") {
-      if (e.ahead) { audio.whoosh(); toast(`You're ahead of ${rivalBot.name === "Rival" ? "your rival" : rivalBot.name}!`, 1800); }
-      else toast("Your rival's back in front — dig in!", 1800);
+      const v = settings.hero ? villainOf(rivalBot.name) : undefined;
+      if (e.ahead) { audio.whoosh(); if (settings.hero) burst(); toast(v ? `${v.name}: “${pick(v.beaten)}”` : `You're ahead of ${rivalBot.name === "Rival" ? "your rival" : rivalBot.name}!`, 2200); }
+      else toast(v ? `${v.name}: “${pick(v.taunts)}”` : "Your rival's back in front — dig in!", 2200);
       const r = $("race"); r.classList.remove("pulse"); void r.offsetWidth; r.classList.add("pulse");
     } else if (e.type === "finish") {
       const r = e.rival, d = r ? e.time - r.time : 0;
@@ -610,6 +667,7 @@ function loop(now: number) {
   crank += (f.animRpm / 60) * TAU * dt;
   if (settings.riders) pack.update(dt, f.pos, f.kmh, f.state === "riding", (m) => gradeAt(profile, route.total, m));
   challengeFrame(dt, f);
+  villainBanter(f);
   if (view === "ride") {
     if (camMode === "road" && road.ready) { try { road.render(f, dt, crank); } catch (e) { console.error(e); } }
     mapView.update(f, dt, crank, now);
@@ -634,6 +692,7 @@ async function boot() {
   route = chooseRoute();
   profile = await loadProfile(route);
   checkBadges(); // what you've already earned, so only new ones are announced
+  applyHero();
   openingQuestions(); // straight away, not after the map has loaded
   $("loadingTxt").textContent = "Loading the map…";
   try {

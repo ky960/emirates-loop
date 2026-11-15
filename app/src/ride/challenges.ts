@@ -92,6 +92,8 @@ export class ChallengeRunner {
   /** Your recent cadence and speed, to set hold targets and pacers you can just about beat. */
   private avgRpm = 80;
   private avgKmh = 26;
+  /** Names for the pacers you race the first time round (villains in night-hero mode). */
+  pacers = PACERS;
 
   /** estTime(c, kmh): how long the challenge takes at a flat-road pace of kmh (climbs: on their gradient). */
   constructor(private list: () => Challenge[], private route: () => Route, private store: ChallengeStore, private estTime?: (c: Challenge, kmh: number) => number) {}
@@ -109,7 +111,7 @@ export class ChallengeRunner {
     const best = this.store.best(c.id);
     if (best !== null) return { name: "Your best", time: best, isBest: true };
     const t = this.estTime ? this.estTime(c, this.avgKmh * 1.06) : (c.m1 - c.m0) / ((this.avgKmh * 1.06) / 3.6);
-    return { name: PACERS[Math.abs(Math.round(c.m0)) % PACERS.length], time: t, isBest: false };
+    return { name: this.pacers[Math.abs(Math.round(c.m0)) % this.pacers.length], time: t, isBest: false };
   }
 
   update(dt: number, f: { pos: number; kmh: number; rpm: number | null; riding: boolean }): { events: ChallengeEvent[]; status: ChallengeStatus | null } {
