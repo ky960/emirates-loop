@@ -30,6 +30,11 @@ export interface Look {
   armor?: number;
   /** Headlight beam (the hero only: it's a real light). */
   light?: boolean;
+  /**
+   * A rigged character (Mixamo skeleton) to wear instead of the built-in body: it's posed every frame to match the
+   * cyclist's pedalling skeleton, so it rides the same bike. Headgear, emblem and armour are then left off.
+   */
+  body?: THREE.Object3D;
 }
 export interface RiderKit { jersey: number; panel: number; frame: number; look?: Look }
 export const DEFAULT_KIT: RiderKit = { jersey: 0xf0622e, panel: 0xfff4e6, frame: 0x12898a };
@@ -285,6 +290,7 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
   if (look) dressUp(look);
 
   function dressUp(L: Look) {
+    if (L.body) wear(L.body);
     const M = (c: number, o: { r?: number; m?: number; e?: number; ec?: number } = {}) => new THREE.MeshStandardMaterial({ color: c, roughness: o.r ?? 0.45, metalness: o.m ?? 0.2, emissive: new THREE.Color(o.ec ?? 0), emissiveIntensity: o.e ?? 0 });
     const glow = (c: number, opacity = 0.9) => new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
     // Shorts, shoes and other clothing in the trim colour; bike in its colour.
@@ -298,6 +304,7 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     // Headgear replaces the cycling helmet.
     helmet.visible = false;
     const hat = new THREE.Group();
+    hat.visible = !L.body;
     helmetPivot.add(hat);
     const headMat = M(L.head === "cowl" ? L.suit : L.trim, { r: 0.4, m: 0.3 });
     if (L.head === "cowl" || L.head === "hood") {
@@ -340,7 +347,7 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       } else for (const sd of [-1, 1]) { const e = new THREE.Mesh(new THREE.SphereGeometry(0.013, 8, 6), glow(L.eyes)); e.position.set(sd * 0.034, 0.05, 0.11); hat.add(e); }
     }
     // Chest emblem (the hero's gold falcon wings), following the upper spine.
-    if (L.emblem && bodyBones.Spine2) {
+    if (L.emblem && !L.body && bodyBones.Spine2) {
       const pv = follow(bodyBones.Spine2);
       const wing = new THREE.Shape();
       wing.moveTo(0, -0.03); wing.lineTo(0.09, 0.035); wing.lineTo(0.05, 0.03); wing.lineTo(0.075, 0.06); wing.lineTo(0.02, 0.035); wing.lineTo(0, 0.07);
@@ -349,7 +356,7 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       em.position.set(0, 0.05, L.armor !== undefined ? 0.165 : 0.14); em.rotation.x = -0.25;
       pv.add(em);
     }
-    if (L.armor !== undefined) armour(L.armor);
+    if (L.armor !== undefined && !L.body) armour(L.armor);
     // Cape: cloth hanging from the shoulders, streaming back with speed.
     if (L.cape !== undefined && bodyBones.Neck) {
       const SEG_X = 6, SEG_Y = 10, geo = new THREE.PlaneGeometry(1, 1, SEG_X, SEG_Y);
@@ -371,7 +378,8 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
         const flap = Math.min(1, mps / 6) * 0.07;
         for (let i = 0; i < pos.count; i++) {
           const u = base[i * 3], v = 0.5 - base[i * 3 + 1]; // u -0.5..0.5 across, v 0 (top) .. 1 (hem)
-          const heavy = L.armor !== undefined, w = heavy ? 0.42 + 0.42 * v : 0.36 + 0.32 * v, len = heavy ? 1.3 : 1.05;
+          // Over a full suit the cape is narrower and shorter, so the suit still shows from behind.
+          const heavy = L.armor !== undefined && !L.body, w = L.body ? 0.3 + 0.26 * v : heavy ? 0.42 + 0.42 * v : 0.36 + 0.32 * v, len = L.body ? 0.95 : heavy ? 1.3 : 1.05;
           const ripple = (Math.sin(t * 9 - v * 5 + u * 2) * flap * v + Math.sin(t * 4.3 + u * 6) * 0.015 * v) * (heavy ? 0.7 : 1);
           const sag = v * v * 0.12 * (1 - Math.min(1, mps / 11));
           pos.setXYZ(i, anchor.x + u * w, anchor.y + down.y * v * len - sag + nrm.y * ripple, anchor.z + down.z * v * len + nrm.z * ripple);
@@ -411,6 +419,90 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     }
     jetUpdate = (mps: number) => { const k = Math.min(1, mps / 12); for (const j of jets) { j.scale.set(0.6 + k * 0.6, 0.3 + k * (1.4 + Math.random() * 0.3), 0.6 + k * 0.6); j.position.z = -0.9 - j.scale.y * 0.2; } };
   }
+  /**
+   * Wear a rigged character: hide the cyclist's body (its skeleton keeps pedalling) and, every frame, turn each of the
+   * character's bones to point the same way as the cyclist's, with the hips placed and turned to match.
+   */
+  function wear(suit: THREE.Object3D) {
+    const sb: Record<string, THREE.Bone> = {};
+    suit.traverse((o) => {
+      if ((o as THREE.Bone).isBone) sb[o.name.replace(/^mixamorig:?/, "").replace(/_\d+$/, "")] = o as THREE.Bone;
+      const m = o as THREE.Mesh;
+      if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; m.frustumCulled = false; if (/Cap/i.test(m.name)) m.visible = false; }
+      if (m.isMesh && /Glass/i.test(m.name)) m.material = new THREE.MeshBasicMaterial({ color: 0xffb020, toneMapped: false });
+    });
+    const need = ["Hips", "Spine", "LeftUpLeg", "LeftLeg", "LeftFoot", "RightUpLeg", "LeftArm", "LeftForeArm", "LeftHand"];
+    if (need.some((n) => !sb[n] || !bodyBones[n])) return;
+    for (const m of skinned) m.visible = false;
+    helmet.visible = false;
+    const wrap = new THREE.Group();
+    wrap.add(suit);
+    scene.add(wrap);
+    // Same leg length as the cyclist.
+    const w = (b: THREE.Object3D) => b.getWorldPosition(new THREE.Vector3());
+    scene.updateMatrixWorld(true);
+    const legC = w(bodyBones.LeftUpLeg).distanceTo(w(bodyBones.LeftLeg)) + w(bodyBones.LeftLeg).distanceTo(w(bodyBones.LeftFoot));
+    const legS = w(sb.LeftUpLeg).distanceTo(w(sb.LeftLeg)) + w(sb.LeftLeg).distanceTo(w(sb.LeftFoot));
+    wrap.scale.multiplyScalar(legC / legS);
+    scene.updateMatrixWorld(true);
+    const rest = new Map<THREE.Bone, THREE.Quaternion>();
+    Object.values(sb).forEach((b) => rest.set(b, b.quaternion.clone()));
+    // Bone -> the child that gives its direction.
+    // (Neck and head keep the suit's own pose: its helmet sits on the collar as modelled.)
+    const chain: Array<[string, string]> = [["Spine", "Spine1"], ["Spine1", "Spine2"]];
+    for (const sd of ["Left", "Right"]) chain.push([sd + "Shoulder", sd + "Arm"], [sd + "Arm", sd + "ForeArm"], [sd + "ForeArm", sd + "Hand"], [sd + "Hand", sd + "HandMiddle1"], [sd + "UpLeg", sd + "Leg"], [sd + "Leg", sd + "Foot"], [sd + "Foot", sd + "ToeBase"]);
+    const usable = chain.filter(([a, b]) => sb[a] && sb[b] && bodyBones[a] && bodyBones[b]);
+    const pa = new THREE.Vector3(), pb = new THREE.Vector3(), dc = new THREE.Vector3(), ds = new THREE.Vector3();
+    const q = new THREE.Quaternion(), qw = new THREE.Quaternion(), qp = new THREE.Quaternion(), m1 = new THREE.Matrix4(), m2 = new THREE.Matrix4();
+    const frame = (hips: THREE.Object3D, spine: THREE.Object3D, l: THREE.Object3D, r: THREE.Object3D, out: THREE.Matrix4) => {
+      const up = w(spine).sub(w(hips)).normalize(), side = w(r).sub(w(l));
+      const fwd = new THREE.Vector3().crossVectors(side, up).normalize(), x = new THREE.Vector3().crossVectors(up, fwd).normalize();
+      return out.makeBasis(x, up, fwd);
+    };
+    followers.push(() => {
+      for (const [b, rq] of rest) b.quaternion.copy(rq);
+      wrap.updateMatrixWorld(true);
+      // Hips: same place, same turn (from the hips->spine and left->right leg directions).
+      const H = sb.Hips;
+      const target = w(bodyBones.Hips);
+      frame(bodyBones.Hips, bodyBones.Spine, bodyBones.LeftUpLeg, bodyBones.RightUpLeg, m1);
+      frame(H, sb.Spine, sb.LeftUpLeg, sb.RightUpLeg, m2);
+      q.setFromRotationMatrix(m1).multiply(qp.setFromRotationMatrix(m2).invert());
+      H.getWorldQuaternion(qw).premultiply(q);
+      H.parent!.getWorldQuaternion(qp);
+      H.quaternion.copy(qp.invert().multiply(qw));
+      H.parent!.worldToLocal(H.position.copy(target));
+      H.updateMatrixWorld(true);
+      // Every other bone: swing to point where the cyclist's does.
+      for (const [a, b] of usable) {
+        const A = sb[a], B2 = sb[b];
+        A.getWorldPosition(pa); B2.getWorldPosition(pb); ds.subVectors(pb, pa).normalize();
+        bodyBones[a].getWorldPosition(pa); bodyBones[b].getWorldPosition(pb); dc.subVectors(pb, pa).normalize();
+        q.setFromUnitVectors(ds, dc);
+        A.getWorldQuaternion(qw).premultiply(q);
+        A.parent!.getWorldQuaternion(qp);
+        A.quaternion.copy(qp.invert().multiply(qw));
+        A.updateMatrixWorld(true);
+      }
+      // Hands on the grips: two-bone IK from each shoulder to where the cyclist's hand is, elbows out and down.
+      const right = w(bodyBones.RightUpLeg).sub(w(bodyBones.LeftUpLeg)).normalize(), down = new THREE.Vector3(0, -1, 0);
+      for (const sd of ["Left", "Right"]) {
+        const A = sb[sd + "Arm"], F = sb[sd + "ForeArm"], Hd = sb[sd + "Hand"], tgtB = bodyBones[sd + "Hand"];
+        if (!A || !F || !Hd || !tgtB) continue;
+        const S = w(A), K = w(F), Hp = w(Hd), T = w(tgtB);
+        const L1 = S.distanceTo(K), L2 = K.distanceTo(Hp), dir = T.clone().sub(S), d = THREE.MathUtils.clamp(dir.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
+        dir.normalize();
+        const a = Math.acos(THREE.MathUtils.clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
+        const pole = right.clone().multiplyScalar(sd === "Left" ? -1 : 1).add(down).normalize();
+        pole.addScaledVector(dir, -pole.dot(dir)).normalize();
+        const elbow = S.clone().addScaledVector(dir, L1 * Math.cos(a)).addScaledVector(pole, L1 * Math.sin(a));
+        aim(A, K.sub(S), elbow.clone().sub(S));
+        const K2 = w(F), H2 = w(Hd);
+        aim(F, H2.sub(K2), T.sub(K2));
+      }
+    });
+  }
+
   /** Armour plates that move with the body: chest, shoulders, forearms, shins, belt. */
   function armour(col: number) {
     const B = bodyBones;

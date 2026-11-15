@@ -13,9 +13,9 @@ import { makeWalkers, type Walker } from "./people";
 
 /** One piece of a model, baked into model space (metres, ground at y = 0, facing -Z). */
 export interface Part { geo: THREE.BufferGeometry; mat: THREE.Material; paint?: boolean; shadow?: boolean }
-export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[] }
+export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[]; /** The Shadow Falcon's rigged suit (clone before use). */ heroSuit?: THREE.Object3D }
 
-const FILES = { palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
+const FILES = { suit: "hero_suit.glb", palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
 /** Pedestrians (RenderPeople, CC BY 4.0); the first one carries the walk cycle. */
 const PEOPLE = ["ped_nathan.glb", "ped_eric.glb", "ped_claudia.glb"];
 
@@ -89,8 +89,9 @@ export async function loadModels(base: string): Promise<Models> {
   const L = new GLTFLoader();
   L.setMeshoptDecoder(MeshoptDecoder);
   const get = (f: string) => L.loadAsync(base + "models/" + f).catch((e) => { console.warn("model failed to load", f, e); return null; });
-  const [palm, camry, patrol, cyclist, dhow, camel, ...people] = await Promise.all([get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), get(FILES.dhow), get(FILES.camel), ...PEOPLE.map(get)]);
+  const [suit, palm, camry, patrol, cyclist, dhow, camel, ...people] = await Promise.all([get(FILES.suit), get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), get(FILES.dhow), get(FILES.camel), ...PEOPLE.map(get)]);
   const out: Models = { palmHeight: 7.34, cars: [], walkers: [] };
+  if (suit) out.heroSuit = suit.scene;
   // Traditional dhow (~16 m) for the water near the road, and camels (~2.1 m) for the desert.
   if (dhow) { out.dhow = bake(dhow.scene, fit(dhow.scene, 16)); out.dhow.forEach((p) => (p.shadow = true)); }
   if (camel) { out.camel = bake(camel.scene, fitHeight(camel.scene, 2.1)); out.camel.forEach((p) => (p.shadow = true)); }
