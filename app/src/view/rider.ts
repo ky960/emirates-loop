@@ -659,3 +659,195 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
   }
   return { g, update };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Scanned rider: "Urban Cyclist With Backpack" by restore50 (CC BY 4.0), a photo-real scan of a rider on a city bike.
+// The scan is one solid piece, so its wheels and cranks were cut out when it was compressed; here they are rebuilt so
+// they turn, and the legs are skinned to a small skeleton (thigh, shin, foot) whose feet follow the pedals.
+
+/** Measured in the scan (metres; +Z forward, +X the rider's left, ground at y = -0.95). */
+const SCAN = {
+  ground: -0.95,
+  hubs: [-0.546, 0.572], hubY: -0.605, tyre: 0.345,
+  bb: new THREE.Vector3(0, -0.635, -0.085), crank: 0.17,
+  legs: {
+    // Hip, knee and ankle joint centres, and the ball of the foot (on the pedal) and the toe.
+    left: { hip: V3(0.1, 0.03, -0.22), knee: V3(0.15, -0.11, 0.13), ankle: V3(0.14, -0.38, -0.17), ball: V3(0.14, -0.5, -0.1), toe: V3(0.14, -0.55, -0.03) },
+    right: { hip: V3(-0.1, 0.03, -0.22), knee: V3(-0.16, -0.22, 0.035), ankle: V3(-0.135, -0.67, -0.105), ball: V3(-0.13, -0.765, 0), toe: V3(-0.13, -0.77, 0.07) },
+  },
+};
+
+const _a = new THREE.Vector3(), _b = new THREE.Vector3();
+/** Distance from p to the segment a-b, and how far along it (0..1) the nearest point is. */
+function segDist(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): [number, number] {
+  _a.subVectors(b, a); const t = clamp(_b.subVectors(p, a).dot(_a) / _a.lengthSq(), 0, 1);
+  return [_b.copy(a).addScaledVector(_a, t).distanceTo(p), t];
+}
+const smooth = (e0: number, e1: number, x: number) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+
+export function buildScanRider(src: THREE.Object3D): RiderModel | null {
+  let mesh: THREE.Mesh | undefined;
+  src.updateMatrixWorld(true);
+  src.traverse((o) => { if ((o as THREE.Mesh).isMesh && !mesh) mesh = o as THREE.Mesh; });
+  if (!mesh) return null;
+  const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
+  const pos = geo.getAttribute("position"), person = geo.getAttribute("_leg");
+  const n = pos.count;
+
+  // Bones: 0 static; then thigh, shin, foot for the right (1-3) and left (4-6) legs.
+  const sides = [{ key: "right" as const, sg: -1, phase: 0 }, { key: "left" as const, sg: 1, phase: Math.PI }];
+  // The foot "bone" runs from behind the heel (the heel sits behind the ankle) to the toe.
+  const heels = sides.map(({ key }) => { const L = SCAN.legs[key]; return L.ankle.clone().addScaledVector(L.ankle.clone().sub(L.toe).normalize(), 0.06); });
+  const skinIndex = new Uint16Array(n * 4), skinWeight = new Float32Array(n * 4);
+  const p = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    p.fromBufferAttribute(pos, i);
+    // Baked into the model: 0 for bike parts right next to the feet (chainstays, pedal remains), which must stay put.
+    const isRider = !person || person.getX(i) > 0.5;
+    let best = -1, wTh = 0, wSh = 0, wFt = 0, member = 0;
+    for (let s = 0; s < 2; s++) {
+      const L = SCAN.legs[sides[s].key];
+      if (!isRider || p.x * sides[s].sg < 0.03) continue; // the frame and the crotch stay put
+      const [dTh, tTh] = segDist(p, L.hip, L.knee), [dSh] = segDist(p, L.knee, L.ankle), [dFt] = segDist(p, heels[s], L.toe);
+      // Inside the leg: within a thigh, shin or foot's radius (fading out at the edge, so nearby bike parts stay still).
+      const m = Math.max(1 - smooth(0.12, 0.15, dTh), 1 - smooth(0.08, 0.1, dSh), 1 - smooth(0.11, 0.15, dFt));
+      if (m <= member) continue;
+      member = m; best = s;
+      const a = 1 / (dTh + 0.015) ** 4, b = 1 / (dSh + 0.015) ** 4, c = 1 / (dFt + 0.015) ** 4, sum = a + b + c;
+      // The top of the thigh blends into the (still) seat, so the shorts stretch rather than tear.
+      const hipFade = smooth(0.08, 0.45, tTh);
+      wTh = (a / sum) * hipFade; wSh = b / sum; wFt = c / sum;
+    }
+    const k = i * 4;
+    if (best < 0) { skinIndex[k] = 0; skinWeight[k] = 1; continue; }
+    const base = 1 + best * 3;
+    skinIndex[k] = 0; skinIndex[k + 1] = base; skinIndex[k + 2] = base + 1; skinIndex[k + 3] = base + 2;
+    const sw = 1 - member * (wTh + wSh + wFt);
+    skinWeight[k] = sw; skinWeight[k + 1] = member * wTh; skinWeight[k + 2] = member * wSh; skinWeight[k + 3] = member * wFt;
+  }
+  // Below the knees nothing joins the rider to the bike: drop triangles that bridge a moving foot or shin and a still
+  // part of the bike (scan leftovers such as the pedal under a sole), which would otherwise stretch into streaks.
+  const idx = geo.getIndex();
+  if (idx) {
+    const keep: number[] = [];
+    const moving = (v: number) => 1 - skinWeight[v * 4];
+    for (let t = 0; t < idx.count; t += 3) {
+      const a = idx.getX(t), b = idx.getX(t + 1), c = idx.getX(t + 2);
+      const lo = Math.min(moving(a), moving(b), moving(c)), hi = Math.max(moving(a), moving(b), moving(c));
+      if (hi - lo > 0.35 && Math.max(pos.getY(a), pos.getY(b), pos.getY(c)) < -0.25) continue;
+      keep.push(a, b, c);
+    }
+    geo.setIndex(keep);
+  }
+  geo.setAttribute("skinIndex", new THREE.Uint16BufferAttribute(skinIndex, 4));
+  geo.setAttribute("skinWeight", new THREE.Float32BufferAttribute(skinWeight, 4));
+
+  const g = new THREE.Group();
+  const inner = new THREE.Group();
+  inner.rotation.y = Math.PI; // the scan faces +Z; the scene expects -Z
+  g.add(inner);
+  const body = new THREE.Group();
+  body.position.y = -SCAN.ground; // ground to y = 0
+  inner.add(body);
+
+  const root = new THREE.Bone();
+  const bones: THREE.Bone[] = [root];
+  for (const s of sides) {
+    const L = SCAN.legs[s.key];
+    for (const j of [L.hip, L.knee, L.ankle]) { const b = new THREE.Bone(); b.position.copy(j); bones.push(b); }
+  }
+  for (const b of bones) body.add(b);
+  const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
+  mat.metalness = 0; mat.roughness = 0.75; mat.flatShading = false;
+  const skinned = new THREE.SkinnedMesh(geo, mat);
+  skinned.castShadow = true; skinned.receiveShadow = true; skinned.frustumCulled = false;
+  body.add(skinned);
+  body.updateMatrixWorld(true);
+  skinned.bind(new THREE.Skeleton(bones), skinned.matrixWorld);
+
+  // Wheels: dark tyres on black rims with thin spokes, turning on their hubs.
+  const tyreM = new THREE.MeshStandardMaterial({ color: 0x1a1a1c, roughness: 0.85 });
+  const rimM = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.4, metalness: 0.6 });
+  const spokeM = new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.35, metalness: 0.8 });
+  const wheels: THREE.Group[] = [];
+  for (const z of SCAN.hubs) {
+    const w = new THREE.Group();
+    w.position.set(0, SCAN.hubY, z);
+    const tyre = new THREE.Mesh(new THREE.TorusGeometry(SCAN.tyre - 0.021, 0.021, 10, 56), tyreM); tyre.rotation.y = Math.PI / 2;
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(SCAN.tyre - 0.045, 0.011, 6, 56), rimM); rim.rotation.y = Math.PI / 2;
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.1, 12), rimM); hub.rotation.z = Math.PI / 2;
+    w.add(tyre, rim, hub);
+    const spokeGeo = new THREE.CylinderGeometry(0.0018, 0.0018, SCAN.tyre - 0.06, 4).translate(0, (SCAN.tyre - 0.06) / 2, 0);
+    for (let k = 0; k < 28; k++) {
+      const sp = new THREE.Mesh(spokeGeo, spokeM);
+      sp.position.x = (k % 2 ? 1 : -1) * 0.02;
+      sp.rotation.x = (k / 28) * TAU;
+      w.add(sp);
+    }
+    w.traverse((o) => { o.castShadow = true; });
+    body.add(w);
+    wheels.push(w);
+  }
+
+  // Crankset: chainring on the right (drive) side, two arms and pedals, turning with the cadence.
+  const crankM = new THREE.MeshStandardMaterial({ color: 0x1f2023, roughness: 0.4, metalness: 0.7 });
+  const crank = new THREE.Group();
+  crank.position.copy(SCAN.bb);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.095, 0.006, 6, 40), crankM); ring.rotation.y = Math.PI / 2; ring.position.x = -0.05;
+  const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.003, 32), crankM); disc.rotation.z = Math.PI / 2; disc.position.x = -0.05;
+  const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.16, 10), crankM); axle.rotation.z = Math.PI / 2;
+  crank.add(ring, disc, axle);
+  for (const s of sides) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.028, SCAN.crank + 0.03), crankM);
+    // Arm points along +Z (forward) at crank angle 0 for the right side, backwards for the left.
+    const dir = s.phase === 0 ? 1 : -1;
+    arm.position.set(s.sg * 0.075, 0, (dir * SCAN.crank) / 2);
+    const pedal = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.022, 0.07), crankM);
+    pedal.position.set(s.sg * 0.125, 0, dir * SCAN.crank);
+    crank.add(arm, pedal);
+  }
+  crank.traverse((o) => { o.castShadow = true; });
+  body.add(crank);
+
+  // Leg IK: each foot's ball on its pedal, ankle a foot-length behind and above it, knee bent forward.
+  const legs = sides.map((s, i) => {
+    const L = SCAN.legs[s.key], [th, sh, ft] = [bones[1 + i * 3], bones[2 + i * 3], bones[3 + i * 3]];
+    const footLen = L.ankle.distanceTo(L.ball), l1 = L.hip.distanceTo(L.knee), l2 = L.knee.distanceTo(L.ankle);
+    const restTh = L.knee.clone().sub(L.hip).normalize(), restSh = L.ankle.clone().sub(L.knee).normalize(), restFt = L.ball.clone().sub(L.ankle).normalize();
+    return { ...s, L, th, sh, ft, footLen, l1, l2, restTh, restSh, restFt };
+  });
+  const ped = new THREE.Vector3(), ank = new THREE.Vector3(), knee = new THREE.Vector3(), dir = new THREE.Vector3(), pole = new THREE.Vector3(), tmp = new THREE.Vector3();
+
+  function update(dt: number, mps: number, ck: number) {
+    for (const w of wheels) w.rotation.x += (mps / SCAN.tyre) * dt;
+    crank.rotation.x = ck;
+    g.rotation.z = Math.sin(ck) * 0.008 * Math.min(1, mps / 2);
+    for (const l of legs) {
+      const th = ck + l.phase;
+      // The pedal turns forward-and-down from the front (as the crank arm above).
+      ped.set(l.sg * 0.125, SCAN.bb.y - SCAN.crank * Math.sin(th), SCAN.bb.z + SCAN.crank * Math.cos(th));
+      ped.y += 0.035; // ball of the foot sits on top of the pedal
+      // Foot pitch: ankle up and behind the ball, heel dropping a little on the downstroke.
+      const pitch = THREE.MathUtils.degToRad(132) + 0.22 * Math.sin(th);
+      ank.set(ped.x, ped.y + Math.sin(pitch) * l.footLen, ped.z + Math.cos(pitch) * l.footLen);
+      // Two-bone IK from the hip.
+      const H = l.L.hip;
+      dir.subVectors(ank, H);
+      const d = clamp(dir.length(), Math.abs(l.l1 - l.l2) + 1e-3, l.l1 + l.l2 - 1e-3);
+      dir.normalize();
+      const a = Math.acos(clamp((l.l1 * l.l1 + d * d - l.l2 * l.l2) / (2 * l.l1 * d), -1, 1));
+      pole.set(l.sg * 0.12, 0.15, 1).normalize(); // knees forward, a little out
+      pole.addScaledVector(dir, -pole.dot(dir)).normalize();
+      knee.copy(H).addScaledVector(dir, l.l1 * Math.cos(a)).addScaledVector(pole, l.l1 * Math.sin(a));
+      const ankle = tmp.copy(H).addScaledVector(dir, d);
+      l.th.position.copy(H);
+      l.th.quaternion.setFromUnitVectors(l.restTh, _v1.subVectors(knee, H).normalize());
+      l.sh.position.copy(knee);
+      l.sh.quaternion.setFromUnitVectors(l.restSh, _v1.subVectors(ankle, knee).normalize());
+      l.ft.position.copy(ankle);
+      l.ft.quaternion.setFromUnitVectors(l.restFt, _v1.subVectors(ped, ankle).normalize());
+    }
+  }
+  update(0, 0, 0);
+  return { g, update };
+}

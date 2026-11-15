@@ -13,9 +13,9 @@ import { makeWalkers, type Walker } from "./people";
 
 /** One piece of a model, baked into model space (metres, ground at y = 0, facing -Z). */
 export interface Part { geo: THREE.BufferGeometry; mat: THREE.Material; paint?: boolean; shadow?: boolean }
-export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[]; /** The Shadow Falcon's rigged, armoured body (clone before use). */ heroSuit?: THREE.Object3D }
+export interface Models { palm?: Part[]; palmHeight: number; cars: Part[][]; cyclist?: GLTF; /** Untouched copy of the cyclist, to clone for other riders. */ cyclistSrc?: THREE.Object3D; walkers: Walker[]; dhow?: Part[]; camel?: Part[]; /** The Shadow Falcon's rigged, armoured body (clone before use). */ heroSuit?: THREE.Object3D; /** Your rider: the scanned urban cyclist (build with buildScanRider). */ scanRider?: THREE.Object3D }
 
-const FILES = { suit: "hero_body.glb", palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
+const FILES = { scan: "rider_scan.glb", suit: "hero_body.glb", palm: "date_palm.glb", camry: "camry.glb", patrol: "patrol.glb", cyclist: "cyclist.glb", dhow: "dhow.glb", camel: "camel.glb" };
 /** Pedestrians (RenderPeople, CC BY 4.0); the first one carries the walk cycle. */
 const PEOPLE = ["ped_nathan.glb", "ped_eric.glb", "ped_claudia.glb"];
 
@@ -143,8 +143,9 @@ export async function loadModels(base: string): Promise<Models> {
   const L = new GLTFLoader();
   L.setMeshoptDecoder(MeshoptDecoder);
   const get = (f: string) => L.loadAsync(base + "models/" + f).catch((e) => { console.warn("model failed to load", f, e); return null; });
-  const [suit, palm, camry, patrol, cyclist, dhow, camel, ...people] = await Promise.all([get(FILES.suit), get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), get(FILES.dhow), get(FILES.camel), ...PEOPLE.map(get)]);
+  const [scan, suit, palm, camry, patrol, cyclist, dhow, camel, ...people] = await Promise.all([get(FILES.scan), get(FILES.suit), get(FILES.palm), get(FILES.camry), get(FILES.patrol), get(FILES.cyclist), get(FILES.dhow), get(FILES.camel), ...PEOPLE.map(get)]);
   const out: Models = { palmHeight: 7.34, cars: [], walkers: [] };
+  if (scan) out.scanRider = scan.scene;
   if (suit) { fitSkinToSkeleton(suit.scene); out.heroSuit = suit.scene; }
   // Traditional dhow (~16 m) for the water near the road, and camels (~2.1 m) for the desert.
   if (dhow) { out.dhow = bake(dhow.scene, fit(dhow.scene, 16)); out.dhow.forEach((p) => (p.shadow = true)); }
