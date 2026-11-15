@@ -686,10 +686,91 @@ function segDist(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): [number,
 const smooth = (e0: number, e1: number, x: number) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
 
 /**
- * The Shadow Falcon's suit, painted onto the scan's own texture layout: a black suit with the scan's folds, a cowl with a
- * glowing gold eye slit, a gold falcon on the chest, gold belt, piping and boot cuffs; the bike in gunmetal.
+ * The Shadow Falcon's costume, drawn by the shader from each point's position on the scan (its texture atlas reuses
+ * pixels across body parts, so the costume can't be painted into it). The scan's own colours tell skin from fabric and
+ * give the folds and shading; the costume decides the colour:
+ * midnight-blue suit, black chevron yoke with a gold edge, black gloves and boots with gold cuffs, a gold belt with a
+ * round buckle, a gold falcon on the chest, and a black cowl over the head and nose with glowing lenses, his own jaw
+ * showing below. The bike goes gunmetal.
  */
-export interface ScanSuit { map: THREE.Texture; glow: THREE.Texture }
+function heroCostume(mat: THREE.MeshStandardMaterial) {
+  mat.roughness = 0.5; mat.metalness = 0.12;
+  mat.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nattribute float _part;\nvarying vec3 vScan; varying vec3 vSN; varying float vPart;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvScan = position; vSN = normal; vPart = _part;");
+    sh.fragmentShader = sh.fragmentShader.replace("#include <common>", `#include <common>
+varying vec3 vScan; varying vec3 vSN; varying float vPart;
+vec3 lin(vec3 c) { return pow(c, vec3(2.2)); }
+float lensAt(float sgn) {
+  float u = (vScan.x - sgn * 0.034) * sgn, v = vScan.y - 0.783;
+  return step(abs(v + 0.25 * u), 0.0105) * step(-0.018, u) * step(u, 0.022) * step(0.15, vScan.z);
+}
+// Shin from ankle to knee: how far along it (0..1) and how far from it.
+vec2 shin(vec3 a, vec3 k) {
+  vec3 d = k - a; float t = dot(vScan - a, d) / dot(d, d);
+  return vec2(t, length(vScan - (a + clamp(t, 0.0, 1.0) * d)));
+}
+// Half of the falcon (it is mirrored about x = 0).
+bool falcon(vec2 p) {
+  vec2 v[6] = vec2[6](vec2(0.0, -0.03), vec2(0.09, 0.035), vec2(0.05, 0.03), vec2(0.075, 0.06), vec2(0.02, 0.035), vec2(0.0, 0.07));
+  p.x = abs(p.x); bool inside = false;
+  for (int i = 0, j = 5; i < 6; j = i++) {
+    if (((v[i].y > p.y) != (v[j].y > p.y)) && (p.x < (v[j].x - v[i].x) * (p.y - v[i].y) / (v[j].y - v[i].y) + v[i].x)) inside = !inside;
+  }
+  return inside;
+}`)
+      .replace("#include <map_fragment>", `#include <map_fragment>
+vec3 GOLD = lin(vec3(0.88, 0.64, 0.16)), BLUE = lin(vec3(0.13, 0.25, 0.56)), BLACK = lin(vec3(0.075, 0.08, 0.1));
+vec3 c = pow(diffuseColor.rgb, vec3(1.0 / 2.2));
+float lum = dot(c, vec3(0.3, 0.59, 0.11)), sat = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+vec3 p = vScan; float ax = abs(p.x);
+bool rider = vPart > 0.5;
+bool skin = c.r > c.g + 0.05 && c.g > c.b && lum > 0.2;
+bool white = lum > 0.55 && sat < 0.12;
+bool navy = c.b > c.r + 0.03 && lum < 0.35;
+// The scan's own light and folds, relative to each fabric's average brightness.
+float ref = skin ? 0.66 : white ? 0.82 : navy ? 0.18 : 0.31;
+float shade = pow(clamp(lum / ref, 0.45, 1.5), 0.85);
+vec3 glowCol = vec3(0.0);
+if (!rider) {
+  diffuseColor.rgb = lin(vec3(0.08 + 0.32 * lum, 0.08 + 0.33 * lum, 0.09 + 0.36 * lum));
+} else {
+  bool head = (p.y > 0.6 && ax < 0.09) || p.y > 0.68;
+  bool jaw = head && skin && p.y < 0.736 && p.y > 0.633 && p.z > 0.1;
+  bool arms = skin && !head && (p.y > 0.15 || (p.z > 0.25 && p.y > -0.02));
+  bool legs = skin && !arms && p.y < 0.12;
+  float yokeY = max(0.33, 0.62 - 1.4 * (0.2 - min(ax, 0.2)));
+  vec3 col = BLUE;
+  float gold = 0.0;
+  if (!head && !legs && p.y > yokeY && !(arms && p.y < 0.5)) col = BLACK;
+  if (!head && !legs && abs(p.y - yokeY) < 0.012 && ax < 0.2) gold = 0.15;
+  if (arms && p.z > 0.2) col = BLACK;
+  if (arms && abs(p.z - 0.2) < 0.012) gold = 0.2;
+  vec2 sL = shin(vec3(0.14, -0.38, -0.17), vec3(0.15, -0.11, 0.13)), sR = shin(vec3(-0.135, -0.67, -0.105), vec3(-0.16, -0.22, 0.035));
+  vec2 s = p.x > 0.0 ? sL : sR; float ankleY = p.x > 0.0 ? -0.38 : -0.67;
+  if (ax > 0.03 && ((s.x < 0.42 && s.y < 0.09) || (white && p.y < ankleY + 0.1))) col = BLACK;
+  if (ax > 0.03 && abs(s.x - 0.42) < 0.03 && s.y < 0.09) gold = 0.2;
+  if (!head && !arms && p.y > 0.085 && p.y < 0.118 && ax < 0.25 && p.z > -0.36 && p.z < 0.25 && vSN.y < 0.5) gold = 0.18;
+  float bk = length(vec2(p.x, p.y - 0.1));
+  if (vSN.z > 0.5 && p.z > 0.25 && bk < 0.03) { gold = bk < 0.018 ? 0.6 : 0.0; col = BLACK; }
+  bool front = !head && vSN.z > 0.3 && p.y > 0.15 && p.y < 0.5 && ax < 0.17;
+  if (front && falcon((p.xy - vec2(0.0, 0.255)) / 1.55)) { col = BLACK; gold = 0.0; }
+  if (front && falcon((p.xy - vec2(0.0, 0.251)) / 1.32)) gold = 0.5;
+  if (gold > 0.0) { col = GOLD; glowCol = GOLD * gold; }
+  diffuseColor.rgb = col * shade;
+  if (jaw) { diffuseColor.rgb = lin(c); glowCol = vec3(0.0); }
+  // Cowl: smooth black over the head and nose, with a faint sheen down the middle; two glowing lenses.
+  if (head && !jaw) {
+    float sheen = 0.03 + 0.03 * clamp(1.0 - ax / 0.1, 0.0, 1.0);
+    diffuseColor.rgb = vec3(sheen, sheen, sheen * 1.2); glowCol = vec3(0.0);
+    float lens = max(lensAt(1.0), lensAt(-1.0));
+    if (lens > 0.5) { diffuseColor.rgb = vec3(1.0, 0.95, 0.78); glowCol = vec3(1.0, 0.85, 0.45) * 1.4; }
+  }
+}`)
+      .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\ntotalEmissiveRadiance = glowCol;");
+  };
+  mat.customProgramCacheKey = () => "falcon-costume";
+}
 
 /** Smooth the scan's hair into a sleek cowl: relax the head above the brow, then point its normals outwards. */
 function cowlHead(geo: THREE.BufferGeometry) {
@@ -747,7 +828,7 @@ function scanCape(parent: THREE.Object3D) {
   const COLS = 10, ROWS = 18, LEN = 0.95;
   const geo = new THREE.PlaneGeometry(1, 1, COLS, ROWS);
   const outer = new THREE.MeshStandardMaterial({ color: 0x0b0b0e, roughness: 0.55, metalness: 0.1, side: THREE.BackSide });
-  const lining = new THREE.MeshStandardMaterial({ color: 0x4a3208, roughness: 0.5, metalness: 0.35, emissive: new THREE.Color(0x2a1800), emissiveIntensity: 0.6, side: THREE.FrontSide });
+  const lining = new THREE.MeshStandardMaterial({ color: 0xb07a14, roughness: 0.4, metalness: 0.5, emissive: new THREE.Color(0x3a2400), emissiveIntensity: 0.5, side: THREE.FrontSide });
   const a = new THREE.Mesh(geo, outer), b = new THREE.Mesh(geo, lining);
   a.castShadow = true; a.frustumCulled = b.frustumCulled = false;
   parent.add(a, b);
@@ -798,7 +879,7 @@ function scanCape(parent: THREE.Object3D) {
   };
 }
 
-export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel | null {
+export function buildScanRider(src: THREE.Object3D, hero = false): RiderModel | null {
   let mesh: THREE.Mesh | undefined;
   src.updateMatrixWorld(true);
   src.traverse((o) => { if ((o as THREE.Mesh).isMesh && !mesh) mesh = o as THREE.Mesh; });
@@ -806,7 +887,7 @@ export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel
   const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
   const pos = geo.getAttribute("position"), person = geo.getAttribute("_leg");
   const n = pos.count;
-  if (suit) cowlHead(geo);
+  if (hero) cowlHead(geo);
 
   // Bones: 0 static; then thigh, shin, foot for the right (1-3) and left (4-6) legs.
   const sides = [{ key: "right" as const, sg: -1, phase: 0 }, { key: "left" as const, sg: 1, phase: Math.PI }];
@@ -873,11 +954,7 @@ export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel
   for (const b of bones) body.add(b);
   const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
   mat.metalness = 0; mat.roughness = 0.75; mat.flatShading = false;
-  if (suit) {
-    // Satin suit fabric, with the eyes, emblem and trim lit from within.
-    mat.map = suit.map; mat.emissiveMap = suit.glow; mat.emissive = new THREE.Color(0xffffff); mat.emissiveIntensity = 1.6;
-    mat.roughness = 0.5; mat.metalness = 0.15;
-  }
+  if (hero) heroCostume(mat);
   const skinned = new THREE.SkinnedMesh(geo, mat);
   skinned.castShadow = true; skinned.receiveShadow = true; skinned.frustumCulled = false;
   body.add(skinned);
@@ -887,7 +964,7 @@ export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel
   // Wheels: dark tyres on black rims with thin spokes, turning on their hubs.
   const tyreM = new THREE.MeshStandardMaterial({ color: 0x1a1a1c, roughness: 0.85 });
   // The hero's wheels carry a thin glowing gold ring.
-  const heroRing = suit ? new THREE.MeshBasicMaterial({ color: 0xffb020, toneMapped: false }) : undefined;
+  const heroRing = hero ? new THREE.MeshBasicMaterial({ color: 0xffb020, toneMapped: false }) : undefined;
   const rimM = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.4, metalness: 0.6 });
   const spokeM = new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.35, metalness: 0.8 });
   const wheels: THREE.Group[] = [];
@@ -940,7 +1017,7 @@ export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel
   });
   const ped = new THREE.Vector3(), ank = new THREE.Vector3(), knee = new THREE.Vector3(), dir = new THREE.Vector3(), pole = new THREE.Vector3(), tmp = new THREE.Vector3();
 
-  const capeUpdate = suit ? scanCape(body) : undefined;
+  const capeUpdate = hero ? scanCape(body) : undefined;
 
   function update(dt: number, mps: number, ck: number) {
     capeUpdate?.(dt, mps);

@@ -60,7 +60,7 @@ export function renderSettings(el: HTMLElement, ctx: AppCtx) {
       ${sw("autoPause", "Auto-pause", "Stops the clock when you stop pedalling; pedal to carry on.")}
       ${sw("ghost", "Race your ghost", "Replays your best ride second by second.")}
       ${sw("sound", "Ride sound", "Wind, freewheel and a chime at each town.")}
-      ${sw("hero", "Ride as the Shadow Falcon", "Night-hero mode: you in a black and gold hero suit, the city at night with the falcon signal in the sky, and the other riders as comic villains.")}
+      ${sw("hero", "Ride as the Shadow Falcon", "Night-hero mode: you in a blue, black and gold hero costume and cape, the city at night with the falcon signal in the sky, and the other riders as comic villains.")}
       ${sw("challenges", "Challenges", "Sprints, cadence holds and climbs every few kilometres, with your best times to beat. Simulated rides don't set records.")}
       ${sw("riders", "Other cyclists", "Riders to catch and some who come past. Tuck in close behind one for a slipstream: less drag, more speed.")}
       ${sw("traffic", "Traffic", "Cars on the road in the 3D view. Changes the next time the app opens.")}
