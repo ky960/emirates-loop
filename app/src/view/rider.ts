@@ -737,6 +737,67 @@ function cowlHead(geo: THREE.BufferGeometry) {
   }
 }
 
+/**
+ * The Shadow Falcon's cape, for the scanned rider (scan space: +Z forward). Each column of the cloth is a chain hung
+ * from the shoulders: every link points the way gravity and the wind of your speed pull it, then is pushed out of the
+ * rider's back, the bag on the rack and the rear wheel, so it slides down the back, drapes over the bag when slow
+ * and streams out behind at speed.
+ */
+function scanCape(parent: THREE.Object3D) {
+  const COLS = 10, ROWS = 18, LEN = 0.95;
+  const geo = new THREE.PlaneGeometry(1, 1, COLS, ROWS);
+  const outer = new THREE.MeshStandardMaterial({ color: 0x0b0b0e, roughness: 0.55, metalness: 0.1, side: THREE.BackSide });
+  const lining = new THREE.MeshStandardMaterial({ color: 0x4a3208, roughness: 0.5, metalness: 0.35, emissive: new THREE.Color(0x2a1800), emissiveIntensity: 0.6, side: THREE.FrontSide });
+  const a = new THREE.Mesh(geo, outer), b = new THREE.Mesh(geo, lining);
+  a.castShadow = true; a.frustumCulled = b.frustumCulled = false;
+  parent.add(a, b);
+  const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+  // Rider's back (it leans forward) and the bag on the rack.
+  const backZ = (y: number) => -0.157 - 0.455 * (0.62 - y);
+  const BAG = new THREE.Vector3(0, -0.005, -0.51), BR = new THREE.Vector3(0.27, 0.27, 0.215);
+  const p = new THREE.Vector3(), q = new THREE.Vector3(), d = new THREE.Vector3();
+  const chain = Array.from({ length: COLS + 1 }, () => Array.from({ length: ROWS + 1 }, () => new THREE.Vector3()));
+  let t = 0, lift = 0;
+  const solid = (v: THREE.Vector3) => {
+    // Out of the back (a little behind it), above the bag (an ellipsoid), above the rear wheel.
+    if (v.y > 0.05 && v.y < 0.66 && Math.abs(v.x) < 0.32) v.z = Math.min(v.z, backZ(v.y) - 0.03);
+    q.subVectors(v, BAG).divide(BR);
+    const r = q.length();
+    if (r < 1) v.copy(BAG).add(q.multiplyScalar(1 / Math.max(r, 1e-3)).multiply(BR));
+    if (v.z < -0.2) v.y = Math.max(v.y, -0.2);
+  };
+  return (dt: number, mps: number) => {
+    t += dt;
+    lift += (Math.min(1, mps / 12) - lift) * Math.min(1, dt * 2); // eases in and out, as cloth does
+    const flap = 0.04 + 0.16 * lift;
+    for (let c = 0; c <= COLS; c++) {
+      const u = c / COLS - 0.5, ch = chain[c];
+      // Collar: wraps round the shoulders behind the neck.
+      ch[0].set(u * 0.4, 0.625 - 0.045 * (2 * u) ** 2, -0.165 + 0.07 * (2 * u) ** 2);
+      for (let r = 1; r <= ROWS; r++) {
+        const v = r / ROWS;
+        const ang = 0.15 + 0.95 * lift + Math.sin(t * 7 - v * 7 + u * 4) * flap * v + Math.sin(t * 2.3 + u * 9) * 0.05 * v;
+        d.set(u * 0.12 * (1 + lift), -Math.cos(ang), -Math.sin(ang)).normalize();
+        p.copy(ch[r - 1]).addScaledVector(d, LEN / ROWS);
+        solid(p);
+        // Keep the link length after pushing it out.
+        p.sub(ch[r - 1]).setLength(LEN / ROWS).add(ch[r - 1]);
+        solid(p);
+        ch[r].copy(p);
+      }
+    }
+    for (let r = 0; r <= ROWS; r++) for (let c = 0; c <= COLS; c++) {
+      const v = r / ROWS, src = chain[c][r];
+      // Wider towards the hem.
+      // Wider towards the hem, and full in the middle: the cloth bellies out behind as the wind catches it.
+      const u = c / COLS - 0.5, spread = 1 + 0.9 * v, belly = (1 - (2 * u) ** 2) * Math.sin(Math.PI * Math.min(1, v * 1.4)) * (0.03 + 0.07 * lift);
+      pos.setXYZ(r * (COLS + 1) + c, src.x * spread, src.y + belly * 0.6, src.z - belly);
+    }
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+  };
+}
+
 export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel | null {
   let mesh: THREE.Mesh | undefined;
   src.updateMatrixWorld(true);
@@ -879,7 +940,10 @@ export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel
   });
   const ped = new THREE.Vector3(), ank = new THREE.Vector3(), knee = new THREE.Vector3(), dir = new THREE.Vector3(), pole = new THREE.Vector3(), tmp = new THREE.Vector3();
 
+  const capeUpdate = suit ? scanCape(body) : undefined;
+
   function update(dt: number, mps: number, ck: number) {
+    capeUpdate?.(dt, mps);
     for (const w of wheels) w.rotation.x += (mps / SCAN.tyre) * dt;
     crank.rotation.x = ck;
     g.rotation.z = Math.sin(ck) * 0.008 * Math.min(1, mps / 2);
