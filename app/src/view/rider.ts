@@ -409,6 +409,11 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     const legS = w(sb.LeftUpLeg).distanceTo(w(sb.LeftLeg)) + w(sb.LeftLeg).distanceTo(w(sb.LeftFoot));
     wrap.scale.multiplyScalar(legC / legS);
     scene.updateMatrixWorld(true);
+    // The bone that carries both the legs and the spine: usually Hips, but some rigs hang the spine off a root above it.
+    const carriesLegs = new Set<THREE.Object3D>();
+    for (let o: THREE.Object3D | null = sb.LeftUpLeg; o; o = o.parent) carriesLegs.add(o);
+    let pelvis: THREE.Object3D = sb.Hips;
+    for (let o: THREE.Object3D | null = sb.Spine; o; o = o.parent) if (carriesLegs.has(o)) { pelvis = o; break; }
     const rest = new Map<THREE.Bone, THREE.Quaternion>();
     Object.values(sb).forEach((b) => rest.set(b, b.quaternion.clone()));
     // Bone -> the child that gives its direction.
@@ -418,23 +423,31 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     const pa = new THREE.Vector3(), pb = new THREE.Vector3(), dc = new THREE.Vector3(), ds = new THREE.Vector3();
     const q = new THREE.Quaternion(), qw = new THREE.Quaternion(), qp = new THREE.Quaternion(), m1 = new THREE.Matrix4(), m2 = new THREE.Matrix4();
     const frame = (hips: THREE.Object3D, spine: THREE.Object3D, l: THREE.Object3D, r: THREE.Object3D, out: THREE.Matrix4) => {
-      const up = w(spine).sub(w(hips)).normalize(), side = w(r).sub(w(l));
-      const fwd = new THREE.Vector3().crossVectors(side, up).normalize(), x = new THREE.Vector3().crossVectors(up, fwd).normalize();
-      return out.makeBasis(x, up, fwd);
+      // The line between the hip joints is exact; "up" only sets the pitch about it (spines vary between rigs).
+      const side = w(r).sub(w(l)).normalize(), up0 = w(spine).sub(w(hips));
+      const fwd = new THREE.Vector3().crossVectors(side, up0).normalize(), up = new THREE.Vector3().crossVectors(fwd, side).normalize();
+      return out.makeBasis(side, up, fwd);
     };
     followers.push(() => {
       for (const [b, rq] of rest) b.quaternion.copy(rq);
       wrap.updateMatrixWorld(true);
       // Hips: same place, same turn (from the hips->spine and left->right leg directions).
-      const H = sb.Hips;
+      const H = pelvis;
       const target = w(bodyBones.Hips);
+      // The worn body's "up" runs from its hips to its upper spine: some rigs put their first spine bone level with (or
+      // below) the hips. The cyclist's first spine bone sits squarely above its hips, and doesn't lean with the back.
       frame(bodyBones.Hips, bodyBones.Spine, bodyBones.LeftUpLeg, bodyBones.RightUpLeg, m1);
-      frame(H, sb.Spine, sb.LeftUpLeg, sb.RightUpLeg, m2);
+      frame(H, sb.Spine2 ?? sb.Spine, sb.LeftUpLeg, sb.RightUpLeg, m2);
       q.setFromRotationMatrix(m1).multiply(qp.setFromRotationMatrix(m2).invert());
       H.getWorldQuaternion(qw).premultiply(q);
       H.parent!.getWorldQuaternion(qp);
       H.quaternion.copy(qp.invert().multiply(qw));
       H.parent!.worldToLocal(H.position.copy(target));
+      H.updateMatrixWorld(true);
+      // Then shift so the hip joints (where the thighs start) line up: rigs differ in where they put the hips bone.
+      const midC = w(bodyBones.LeftUpLeg).add(w(bodyBones.RightUpLeg)).multiplyScalar(0.5);
+      const midS = w(sb.LeftUpLeg).add(w(sb.RightUpLeg)).multiplyScalar(0.5);
+      H.parent!.worldToLocal(H.position.copy(target).add(midC).sub(midS));
       H.updateMatrixWorld(true);
       // Every other bone: swing to point where the cyclist's does.
       for (const [a, b] of usable) {
@@ -544,6 +557,62 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     };
   });
   const spine = bones.Spine, spineQ = spine.quaternion.clone();
+
+  // Riding posture. The model sits bolt upright with straight arms; lean the back forward, bend the elbows so the
+  // hands stay on the grips, and lift the head to look down the road.
+  const upperNames = ["Spine1", "Spine2", "Neck", "Head", "LeftShoulder", "RightShoulder", "LeftArm", "RightArm", "LeftForeArm", "RightForeArm", "LeftHand", "RightHand"];
+  const upperRest = upperNames.filter((n) => bones[n]).map((n) => [bones[n], bones[n].quaternion.clone()] as const);
+  const sceneInv = scene.getWorldQuaternion(new THREE.Quaternion()).invert();
+  const arms = (["Left", "Right"] as const).flatMap((sd) => {
+    const A = bones[sd + "Arm"], F = bones[sd + "ForeArm"], Hd = bones[sd + "Hand"];
+    if (!A || !F || !Hd) return [];
+    // Grip position and hand turn in model space, from the rest pose (where the hands hold the bars).
+    return [{ A, F, Hd, side: sd === "Left" ? 1 : -1, grip: scene.worldToLocal(Hd.getWorldPosition(new THREE.Vector3())), handQ: Hd.getWorldQuaternion(new THREE.Quaternion()).premultiply(sceneInv) }];
+  });
+  /** Turn `bone` by `angle` about a world-space axis. */
+  const turn = (bone: THREE.Object3D, axis: THREE.Vector3, angle: number) => {
+    bone.getWorldQuaternion(_q2).premultiply(_q1.setFromAxisAngle(axis, angle));
+    bone.parent!.getWorldQuaternion(_q1);
+    bone.quaternion.copy(_q1.invert().multiply(_q2));
+    bone.updateMatrixWorld(true);
+  };
+  const lat = new THREE.Vector3(), up3 = new THREE.Vector3(), S3 = new THREE.Vector3(), K3 = new THREE.Vector3(), H3 = new THREE.Vector3(), T3 = new THREE.Vector3();
+  let t = 0;
+  function posture(mps: number, ck: number) {
+    for (const [b, q] of upperRest) b.quaternion.copy(q);
+    g.updateMatrixWorld(true);
+    lat.set(1, 0, 0).applyQuaternion(sceneQ); // the rider's left-right axis: turning about it tips the body forward
+    up3.set(0, 1, 0).applyQuaternion(sceneQ);
+    const speed = Math.min(1, mps / 10);
+    // Lean further forward with speed, breathe, and rock slightly with each pedal stroke.
+    const lean = 0.6 + 0.15 * speed + Math.sin(t * 1.6) * 0.012;
+    turn(spine, lat, lean * 0.45);
+    if (bones.Spine1) turn(bones.Spine1, lat, lean * 0.3);
+    if (bones.Spine2) { turn(bones.Spine2, lat, lean * 0.25); turn(bones.Spine2, up3, Math.sin(ck) * 0.05 * Math.min(1, mps / 5)); }
+    // Head up, eyes on the road (undo most of the lean), with a little bob.
+    if (bones.Neck) turn(bones.Neck, lat, -lean * 0.45);
+    if (bones.Head) turn(bones.Head, lat, -lean * 0.5 + Math.sin(ck * 2) * 0.012 * Math.min(1, mps / 5));
+    // Arms: two-bone IK from each shoulder to its grip, elbows bent out, down and back.
+    for (const a of arms) {
+      a.A.getWorldPosition(S3); a.F.getWorldPosition(K3); a.Hd.getWorldPosition(H3);
+      T3.copy(a.grip); scene.localToWorld(T3);
+      const L1 = S3.distanceTo(K3), L2 = K3.distanceTo(H3), dir = T3.clone().sub(S3);
+      const d = clamp(dir.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
+      dir.normalize();
+      const ang = Math.acos(clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
+      const pole = _v3.set(a.side * 0.7, -1, -0.45).normalize().applyQuaternion(sceneQ);
+      pole.addScaledVector(dir, -pole.dot(dir)).normalize();
+      const elbow = S3.clone().addScaledVector(dir, L1 * Math.cos(ang)).addScaledVector(pole, L1 * Math.sin(ang));
+      aim(a.A, K3.clone().sub(S3), elbow.clone().sub(S3));
+      a.F.getWorldPosition(K3); a.Hd.getWorldPosition(H3);
+      aim(a.F, H3.clone().sub(K3), T3.clone().sub(K3));
+      // Hand keeps its grip on the bar.
+      _q2.copy(sceneQ).multiply(a.handQ);
+      a.Hd.parent!.getWorldQuaternion(_q1);
+      a.Hd.quaternion.copy(_q1.invert().multiply(_q2));
+      a.Hd.updateMatrixWorld(true);
+    }
+  }
   const sceneQ = new THREE.Quaternion(), fwd = new THREE.Vector3(), tgt = new THREE.Vector3(), H = new THREE.Vector3(), K = new THREE.Vector3(), A = new THREE.Vector3();
 
   function update(dt: number, mps: number, ck: number) {
@@ -579,6 +648,8 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       l.foot.parent!.getWorldQuaternion(_q1);
       l.foot.quaternion.copy(_q1.invert().multiply(want));
     }
+    t += dt;
+    posture(mps, ck);
     // Helmet follows the head: same offset, turned by however far the head has rotated from its rest pose.
     const head = bones.Head;
     head.updateMatrixWorld(true);
