@@ -12,10 +12,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600;700&display=swap">
   <title>Emirates Loop</title>
-  <script type="module" crossorigin src="./assets/index-CP2ph8UU.js"></script>
+  <script type="module" crossorigin src="./assets/index-qHHA_5zN.js"></script>
   <link rel="modulepreload" crossorigin href="./assets/maplibre-x67qOzbu.js">
   <link rel="modulepreload" crossorigin href="./assets/three-BRuHzd9b.js">
-  <link rel="stylesheet" crossorigin href="./assets/index-CtwRkRX_.css">
+  <link rel="stylesheet" crossorigin href="./assets/index-CCTin-k_.css">
 <link rel="manifest" href="./manifest.webmanifest"></head>
 <body>
   <div class="app" id="app">
@@ -58,6 +58,21 @@
           <button data-cam="loop" aria-pressed="false">Loop</button>
         </div>
 
+        <div class="race" id="race" hidden>
+          <div class="race-top"><span id="raceName"></span><b id="raceGap"></b></div>
+          <div class="race-track"><div class="race-fill" id="raceFill"></div><i class="race-you" id="raceYou"></i><i class="race-rival" id="raceRival"></i></div>
+          <div class="race-sub"><span id="raceSub"></span><span id="raceVs"></span></div>
+        </div>
+        <div class="count" id="count" aria-live="assertive"></div>
+        <canvas class="confetti" id="confetti"></canvas>
+        <div class="medal" id="medal" hidden>
+          <div class="medal-ico" id="medalIco"></div>
+          <small id="medalKind"></small>
+          <strong id="medalTime"></strong>
+          <span id="medalNote"></span>
+          <div class="xp"><b id="medalXp"></b><div class="xpbar"><div id="medalXpBar"></div></div><small id="medalLvl"></small></div>
+        </div>
+        <div class="flash" id="flash"></div>
         <div class="banner" id="banner" aria-live="polite"><small id="bLbl">Now arriving</small><strong id="bName"></strong><span id="bSub"></span></div>
         <div class="pausedov" id="pausedOv" hidden><strong>Paused</strong><span id="pausedSub">Pedal to resume</span></div>
 

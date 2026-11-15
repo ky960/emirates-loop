@@ -12,7 +12,7 @@ Built for one rider on a Samsung Galaxy Tab S7+ in Chrome, with a CYCPLUS speed/
 - **Choose your ride:** when the app opens, continue where your last saved ride ended or start any of the six stages from its beginning (also under *Stages* on the Ride tab), so the 617 km loop is ridden over many sessions. Every ride begins in a roadside car park and rolls out onto the road.
 - **Cinematic camera:** the road view glides from the chase view to an aerial, a side and a front view of you, then back (Settings → Display).
 - **Other cyclists:** riders to catch and some who come past, plus a group in UAE green. Tuck in close behind one for a slipstream.
-- **Challenges:** real climbs, plus a sprint or a 60-second cadence/speed hold every few kilometres, with your best times to beat.
+- **Challenges:** real climbs, plus a sprint or a 60-second cadence/speed hold every few kilometres. Inflatable arches, a 3-2-1 countdown, a gold rival on the road (a pacer, then your best), a live gap, and gold/silver/bronze medals with confetti, fanfare and XP towards your level.
 - **Badges and streaks:** 30 badges (distance, every stage, climbing, long rides, streaks, challenges), shown in History.
 - **Time of day:** your clock, sunrise, midday, sunset, night (lit towers, lamplight, stars), or a day passing as you ride.
 - **Ghost:** replays your best ride second by second.
