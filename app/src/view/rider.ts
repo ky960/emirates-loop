@@ -12,13 +12,12 @@ function orient(m: THREE.Object3D, a: THREE.Vector3, b: THREE.Vector3) {
 }
 
 /**
- * A character look for the detailed rider: a full suit, cape, headgear and bike. Used for the Shadow Falcon (an
+ * A character look for the detailed rider: a full suit, headgear and bike. Used for the Shadow Falcon (an
  * original night hero) and the villains who ride against him.
  */
 export interface Look {
   /** Full-body suit and its trim (shorts, gloves, boots). */
   suit: number; trim: number;
-  cape?: number; capeLining?: number;
   head: "cowl" | "horns" | "tophat" | "hood" | "crown";
   /** Glowing eyes or visor colour. */
   eyes?: number;
@@ -216,6 +215,9 @@ function jerseyMaterial(mesh: THREE.SkinnedMesh, kit: RiderKit) {
 }
 
 export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DEFAULT_KIT): RiderModel | null {
+  // Villains ride as cyclists in their colours: kit in the suit colour, helmet in the trim colour, bike in theirs.
+  const villain = kit.look && !kit.look.body && kit.look.bike === "villain" ? kit.look : undefined;
+  if (villain) kit = { jersey: villain.suit, panel: villain.trim, frame: villain.bikeColor };
   const scene = gltf.scene;
   const bones: Record<string, THREE.Bone> = {};
   const meshes: THREE.Mesh[] = [];
@@ -283,9 +285,17 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
   helmet.position.set(0, 0.098, -0.008);
   helmet.rotation.x = -0.14; // front edge up at the brow, back down over the nape
   scene.add(helmetPivot);
+  if (villain) {
+    (helmet.material as THREE.MeshStandardMaterial).color.set(villain.trim);
+    for (const m of meshes) {
+      if ((m as THREE.SkinnedMesh).isSkinnedMesh || wheels.some((w) => w.children.includes(m))) continue;
+      const mm = (m.material as THREE.MeshStandardMaterial).clone();
+      mm.color.set(villain.bikeColor); mm.metalness = 0.5; mm.roughness = 0.35;
+      m.material = mm;
+    }
+  }
   const look = kit.look;
   const followers: Array<() => void> = [];
-  let capeUpdate: ((dt: number, mps: number) => void) | null = null, jetUpdate: ((mps: number) => void) | null = null;
   const bodyBones = bones;
   if (look) dressUp(look);
 
@@ -357,67 +367,17 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       pv.add(em);
     }
     if (L.armor !== undefined && !L.body) armour(L.armor);
-    // Cape: cloth hanging from the shoulders, streaming back with speed.
-    if (L.cape !== undefined && bodyBones.Neck) {
-      const SEG_X = 6, SEG_Y = 10, geo = new THREE.PlaneGeometry(1, 1, SEG_X, SEG_Y);
-      const mats = [M(L.cape, { r: 0.7, m: 0 }), M(L.capeLining ?? L.cape, { r: 0.6, m: 0.1 })];
-      mats[0].side = THREE.BackSide; mats[1].side = THREE.FrontSide; // outside in the cape colour, lining inside
-      const cape = new THREE.Group(), front = new THREE.Mesh(geo, mats[0]), back = new THREE.Mesh(geo, mats[1]);
-      front.castShadow = true; cape.add(front, back);
-      scene.add(cape);
-      const pos = geo.getAttribute("position") as THREE.BufferAttribute, base = Float32Array.from(pos.array as Float32Array);
-      const neck = bodyBones.Neck, anchor = new THREE.Vector3(), down = new THREE.Vector3(), side = new THREE.Vector3(), nrm = new THREE.Vector3();
-      let t = 0;
-      capeUpdate = (dt: number, mps: number) => {
-        t += dt;
-        neck.getWorldPosition(anchor); scene.worldToLocal(anchor);
-        anchor.z -= 0.09; anchor.y -= 0.03; // just behind the shoulders
-        // Streams back from near vertical (standing) to almost flat at speed. Back is -Z (the model faces +Z).
-        const a = 0.25 + Math.min(1, mps / 11) * 1.05;
-        down.set(0, -Math.cos(a), -Math.sin(a)); side.set(1, 0, 0); nrm.crossVectors(side, down).normalize();
-        const flap = Math.min(1, mps / 6) * 0.07;
-        for (let i = 0; i < pos.count; i++) {
-          const u = base[i * 3], v = 0.5 - base[i * 3 + 1]; // u -0.5..0.5 across, v 0 (top) .. 1 (hem)
-          // Over a full suit the cape is narrower and shorter, so the suit still shows from behind.
-          const heavy = L.armor !== undefined && !L.body, w = L.body ? 0.3 + 0.26 * v : heavy ? 0.42 + 0.42 * v : 0.36 + 0.32 * v, len = L.body ? 0.95 : heavy ? 1.3 : 1.05;
-          const ripple = (Math.sin(t * 9 - v * 5 + u * 2) * flap * v + Math.sin(t * 4.3 + u * 6) * 0.015 * v) * (heavy ? 0.7 : 1);
-          const sag = v * v * 0.12 * (1 - Math.min(1, mps / 11));
-          pos.setXYZ(i, anchor.x + u * w, anchor.y + down.y * v * len - sag + nrm.y * ripple, anchor.z + down.z * v * len + nrm.z * ripple);
-        }
-        pos.needsUpdate = true;
-        geo.computeVertexNormals();
-      };
-    }
-    // Hero / villain bike parts, on the bike (model space: +Z is forward, wheels at z ±0.6, hubs at y 0.345).
-    const bm = M(L.bikeColor, { m: 0.8, r: 0.25 }), accent = M(L.eyes ?? 0xffc400, { m: 0.6, r: 0.3, e: 0.8, ec: L.eyes ?? 0xffa000 });
-    const nose = new THREE.Mesh(new THREE.SphereGeometry(0.2, 18, 12), bm);
-    nose.scale.set(0.55, 0.42, 1.35); nose.position.set(0, 0.8, 0.66); nose.castShadow = true; scene.add(nose);
-    // Swept tail fin over the back wheel, with a glowing edge.
-    const finShape = new THREE.Shape(); finShape.moveTo(0, 0); finShape.lineTo(-0.5, 0); finShape.quadraticCurveTo(-0.46, 0.2, -0.62, 0.38); finShape.quadraticCurveTo(-0.2, 0.18, 0, 0);
-    const finGeo = new THREE.ExtrudeGeometry(finShape, { depth: 0.025, bevelEnabled: false }).translate(0, 0, -0.0125).rotateY(-Math.PI / 2);
-    const fin = new THREE.Mesh(finGeo, bm); fin.position.set(0, 0.74, -0.3); fin.castShadow = true; scene.add(fin);
-    const edge = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.025, 0.42), accent); edge.position.set(0, 0.95, -0.72); edge.rotation.x = 0.62; scene.add(edge);
-    // Disc wheels with a glowing ring.
+    // The hero's bike: dark, with a thin glowing ring on each wheel, a headlight that lights the road and a tail light.
+    const accent = L.eyes ?? 0xffc400;
     for (const w of wheels) {
-      for (const sd of [-1, 1]) { const disc = new THREE.Mesh(new THREE.CircleGeometry(0.3, 28), bm); disc.position.x = sd * 0.03; disc.rotation.y = sd * Math.PI / 2; w.add(disc); }
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.012, 6, 36), glow(L.eyes ?? 0xffc400, 0.85)); ring.rotation.y = Math.PI / 2; w.add(ring);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.29, 0.006, 6, 48), glow(accent, 0.7)); ring.rotation.y = Math.PI / 2; w.add(ring);
     }
-    // Lights: headlight (with a beam for the hero), tail light, and jet glow that grows with speed.
-    const head = new THREE.Mesh(new THREE.CircleGeometry(0.05, 16), glow(0xfff2c0, 1)); head.position.set(0, 0.8, 0.935); scene.add(head);
-    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.03, 0.02), glow(0xff2030, 1)); tail.position.set(0, 0.86, -0.86); scene.add(tail);
+    const head = new THREE.Mesh(new THREE.CircleGeometry(0.03, 16), glow(0xfff2c0, 1)); head.position.set(0, 0.86, 0.66); scene.add(head);
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.02, 0.01), glow(0xff2030, 1)); tail.position.set(0, 0.8, -0.5); scene.add(tail);
     if (L.light) {
-      const beam = new THREE.Mesh(new THREE.ConeGeometry(1.6, 9, 24, 1, true), glow(0xfff2c0, 0.07));
-      beam.rotation.x = -Math.PI / 2; beam.position.set(0, 0.45, 5.4); scene.add(beam);
       const spot = new THREE.SpotLight(0xfff2c0, 60, 40, 0.45, 0.5, 1.4);
-      spot.position.set(0, 0.85, 0.9); spot.target.position.set(0, 0, 12); scene.add(spot, spot.target);
+      spot.position.set(0, 0.86, 0.7); spot.target.position.set(0, 0, 12); scene.add(spot, spot.target);
     }
-    const jets: THREE.Mesh[] = [];
-    for (const sd of [-1, 1]) {
-      const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, 0.22, 12), bm); pipe.rotation.x = Math.PI / 2; pipe.position.set(sd * 0.09, 0.62, -0.78); scene.add(pipe);
-      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.4, 12, 1, true), glow(L.bike === "hero" ? 0x58c8ff : 0xff6a20, 0.8));
-      flame.rotation.x = -Math.PI / 2; flame.position.set(sd * 0.09, 0.62, -1.0); scene.add(flame); jets.push(flame);
-    }
-    jetUpdate = (mps: number) => { const k = Math.min(1, mps / 12); for (const j of jets) { j.scale.set(0.6 + k * 0.6, 0.3 + k * (1.4 + Math.random() * 0.3), 0.6 + k * 0.6); j.position.z = -0.9 - j.scale.y * 0.2; } };
   }
   /**
    * Wear a rigged character: hide the cyclist's body (its skeleton keeps pedalling) and, every frame, turn each of the
@@ -448,8 +408,7 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     const rest = new Map<THREE.Bone, THREE.Quaternion>();
     Object.values(sb).forEach((b) => rest.set(b, b.quaternion.clone()));
     // Bone -> the child that gives its direction.
-    // (Neck and head keep the suit's own pose: its helmet sits on the collar as modelled.)
-    const chain: Array<[string, string]> = [["Spine", "Spine1"], ["Spine1", "Spine2"]];
+    const chain: Array<[string, string]> = [["Spine", "Spine1"], ["Spine1", "Spine2"], ["Spine2", "Neck"], ["Neck", "Head"]];
     for (const sd of ["Left", "Right"]) chain.push([sd + "Shoulder", sd + "Arm"], [sd + "Arm", sd + "ForeArm"], [sd + "ForeArm", sd + "Hand"], [sd + "Hand", sd + "HandMiddle1"], [sd + "UpLeg", sd + "Leg"], [sd + "Leg", sd + "Foot"], [sd + "Foot", sd + "ToeBase"]);
     const usable = chain.filter(([a, b]) => sb[a] && sb[b] && bodyBones[a] && bodyBones[b]);
     const pa = new THREE.Vector3(), pb = new THREE.Vector3(), dc = new THREE.Vector3(), ds = new THREE.Vector3();
@@ -493,7 +452,7 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
         const L1 = S.distanceTo(K), L2 = K.distanceTo(Hp), dir = T.clone().sub(S), d = THREE.MathUtils.clamp(dir.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
         dir.normalize();
         const a = Math.acos(THREE.MathUtils.clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
-        const pole = right.clone().multiplyScalar(sd === "Left" ? -1 : 1).add(down).normalize();
+        const pole = right.clone().multiplyScalar(sd === "Left" ? -0.35 : 0.35).add(down).normalize();
         pole.addScaledVector(dir, -pole.dot(dir)).normalize();
         const elbow = S.clone().addScaledVector(dir, L1 * Math.cos(a)).addScaledVector(pole, L1 * Math.sin(a));
         aim(A, K.sub(S), elbow.clone().sub(S));
@@ -617,8 +576,6 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
     head.getWorldPosition(helmetPivot.position); scene.worldToLocal(helmetPivot.position);
     head.getWorldQuaternion(helmetPivot.quaternion).premultiply(_q1.copy(sceneQ).invert()).multiply(headBind);
     followers.forEach((f) => f());
-    capeUpdate?.(dt, mps);
-    jetUpdate?.(mps);
   }
   return { g, update };
 }

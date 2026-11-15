@@ -141,7 +141,7 @@ async function chooseStart() {
       <span class="label">Ride as</span>
       <button class="btn sm ${settings.hero ? "ghost" : "primary"}" data-act="as:cyclist">🚴 Cyclist</button>
       <button class="btn sm hero ${settings.hero ? "primary" : "ghost"}" data-act="as:hero">🦅 ${HERO_NAME}</button>
-      <small class="muted">${settings.hero ? "Night falls, the falcon signal lights the sky, and the villains are out." : "Ride as a caped night hero against comic villains."}</small>
+      <small class="muted">${settings.hero ? "Night falls, the falcon signal lights the sky, and the villains are out." : "Ride as a masked night hero against comic villains."}</small>
     </div>
     <button class="btn primary continue" data-act="continue">
       <span>${cont > 0 ? "Continue" : "Start the journey"}</span>
@@ -176,7 +176,7 @@ function applyHero() {
   const on = settings.hero;
   pack.cast(on ? {
     solo: VILLAINS.map((v) => ({ name: v.name, kit: v.look.suit, look: v.look })),
-    group: { names: ["Sandstorm's goon", "Dusty", "Grit"], kit: GANG.look.suit, look: { ...GANG.look, head: "hood", cape: undefined } },
+    group: { names: ["Sandstorm's goon", "Dusty", "Grit"], kit: GANG.look.suit, look: { ...GANG.look, head: "hood" } },
   } : null);
   runner.pacers = on ? VILLAINS.map((v) => v.name) : ["Rashid", "Mariam", "Saeed", "Hessa", "Majid", "Shamma"];
   document.body.classList.toggle("hero", on);
