@@ -1,6 +1,6 @@
 import { eleAt, gradeAt, type ElevationProfile } from "../elevation";
 import { estPower, VirtualSpeed } from "../physics";
-import type { Route, Stop } from "../route";
+import type { Place, Route, Stop } from "../route";
 import { wrapM } from "../route";
 import type { Live } from "../sensors/hub";
 import type { Settings } from "../store/settings";
@@ -86,7 +86,7 @@ interface Acc {
 
 const CHECKPOINT_MS = 5000;
 
-export class RideEngine extends Emitter<{ state: RideState; arrival: Stop; checkpoint: object; autostart: void }> {
+export class RideEngine extends Emitter<{ state: RideState; arrival: Stop; landmark: Place; checkpoint: object; autostart: void }> {
   state: RideState = "idle";
   private acc: Acc | null = null;
   private last = 0;
@@ -342,6 +342,12 @@ export class RideEngine extends Emitter<{ state: RideState; arrival: Stop; check
         ? Math.floor((m0 - st.m) / route.total) !== Math.floor((m1 - st.m) / route.total)
         : m0 < st.m && m1 >= st.m;
       if (crossed) this.emit("arrival", st);
+    }
+    // Landmarks along the way.
+    for (const pl of route.places) {
+      if (pl.kind !== "poi" || pl.m === undefined) continue;
+      const crossed = route.loop ? Math.floor((m0 - pl.m) / route.total) !== Math.floor((m1 - pl.m) / route.total) : m0 < pl.m && m1 >= pl.m;
+      if (crossed) this.emit("landmark", pl);
     }
   }
 }

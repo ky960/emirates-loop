@@ -7,7 +7,7 @@ import { avgKmh } from "../ride/types";
 import { pointAt } from "../route";
 import { deleteRide, progressOf } from "../store/rides";
 import { badges, streak } from "../ride/badges";
-import { localChallengeStore, xpLevel } from "../ride/challenges";
+import { landmarkLog, localChallengeStore, xpLevel } from "../ride/challenges";
 import { fmtDuration, fmtShortDuration } from "../util";
 import { drawRideChart, drawWeekly } from "./charts";
 import { html, raw, sheet, toast } from "./dom";
@@ -41,8 +41,10 @@ export function renderHistory(el: HTMLElement, ctx: AppCtx) {
   const climb = rides.reduce<RideRecord | null>((a, r) => (!a || r.climb > a.climb ? r : a), null);
   const f10 = rides.map((r) => ({ r, t: fastest(r, 10000) })).filter((x) => x.t !== null).sort((a, b) => a.t! - b.t!)[0];
   const day = (t: number) => new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short" });
-  const log = localChallengeStore().log(), st = streak(rides), bs = badges(rides, route, log);
-  const L = xpLevel(log, rides.reduce((a, r) => a + r.dist, 0) / 1000), medals = { gold: 0, silver: 0, bronze: 0 };
+  const lmLog = landmarkLog(), seen = new Set(lmLog.map((e) => e.name));
+  const log = localChallengeStore().log(), st = streak(rides), bs = badges(rides, route, log, Date.now(), [...seen]);
+  const L = xpLevel(log, rides.reduce((a, r) => a + r.dist, 0) / 1000, lmLog.length), medals = { gold: 0, silver: 0, bronze: 0 };
+  const sights = route.places.filter((p) => p.kind === "poi" && p.m !== undefined).sort((a, b) => a.m! - b.m!);
   for (const e of log) if (e.medal) medals[e.medal]++;
 
   el.innerHTML = html`
@@ -54,6 +56,9 @@ export function renderHistory(el: HTMLElement, ctx: AppCtx) {
       <div class="stat"><span class="label">Level</span><div class="big">${L.level}<em>${L.xp.toLocaleString()} XP</em></div><div class="xpbar" style="margin:6px 0 4px"><div style="width:${((L.into / L.need) * 100).toFixed(0)}%"></div></div><span class="sub">🥇 ${medals.gold} · 🥈 ${medals.silver} · 🥉 ${medals.bronze} · ${L.need - L.into} XP to level ${L.level + 1}</span></div>
       <div class="stat"><span class="label">Streak</span><div class="big">${st.current}<em>day${st.current === 1 ? "" : "s"}</em></div><span class="sub">best ${st.best} day${st.best === 1 ? "" : "s"} in a row</span></div>
     </div>
+    ${sights.length ? html`<div class="card"><h2>Landmarks <span class="muted" style="font-size:16px;letter-spacing:0">${sights.filter((p) => seen.has(p.name)).length} of ${sights.length} reached</span></h2>
+      <div class="sights">${sights.map((p) => html`<div class="sight ${seen.has(p.name) ? "seen" : ""}" title="${p.fact ?? ""}"><span class="ico">${p.icon ?? "📍"}</span><b>${p.name}</b><small>${seen.has(p.name) ? (p.fact ?? "") : `${(p.m! / 1000).toFixed(0)} km into the loop`}</small></div>`)}</div>
+    </div>` : ""}
     <div class="card"><h2>Badges <span class="muted" style="font-size:16px;letter-spacing:0">${bs.filter((b) => b.earned).length} of ${bs.length}</span></h2>
       <div class="badges">${bs.map((b) => html`<div class="badge ${b.earned ? "earned" : ""}" title="${b.desc}"><span class="ico">${b.icon}</span><b>${b.title}</b><small>${b.desc}</small>${!b.earned && b.progress ? html`<div class="bar"><div style="width:${((b.progress[0] / b.progress[1]) * 100).toFixed(0)}%"></div></div><small>${b.progress[0].toLocaleString()} / ${b.progress[1].toLocaleString()}</small>` : ""}</div>`)}</div>
     </div>

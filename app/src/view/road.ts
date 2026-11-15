@@ -470,6 +470,22 @@ function archLabel(text: string, finish: boolean): THREE.Material {
   return m;
 }
 
+/** Brown tourist-attraction sign: English name, Arabic name, and a camera symbol. */
+function tourSign(name: string, ar: string) {
+  return rTex(560, 260, (c, w, h) => {
+    c.fillStyle = "#6b3f1d"; c.fillRect(0, 0, w, h);
+    c.strokeStyle = "#f4efe6"; c.lineWidth = 8; c.strokeRect(10, 10, w - 20, h - 20);
+    // Camera pictogram on the left.
+    c.fillStyle = "#f4efe6"; c.fillRect(34, 92, 96, 66); c.fillRect(58, 80, 34, 16);
+    c.fillStyle = "#6b3f1d"; c.beginPath(); c.arc(82, 125, 22, 0, Math.PI * 2); c.fill();
+    c.fillStyle = "#f4efe6"; c.beginPath(); c.arc(82, 125, 13, 0, Math.PI * 2); c.fill();
+    c.textBaseline = "middle"; c.textAlign = "left"; c.fillStyle = "#f7f3ea";
+    if (ar) { c.font = "600 44px 'Noto Naskh Arabic', 'Segoe UI', Tahoma, sans-serif"; c.fillText(ar, 152, h * 0.34, w - 176); }
+    c.font = `700 ${name.length > 14 ? 40 : 50}px Barlow, Arial, sans-serif`;
+    c.fillText(name.toUpperCase(), 152, ar ? h * 0.7 : h * 0.5, w - 176);
+  });
+}
+
 function signBoard(name: string, km: number) {
   return rTex(512, 256, (c, w, h) => {
     c.fillStyle = "#0B6A3A"; c.fillRect(0, 0, w, h);
@@ -1196,6 +1212,21 @@ export class RoadView {
     add(inst(GEO.shelterRoof, MAT.shelter, it.shelter)); add(inst(GEO.shelterFrame, MAT.shelter, it.shelter)); add(inst(GEO.shelterGlass, MAT.glass, it.shelter, false));
     yield;
 
+    // Brown tourist signs (as on UAE roads) 200 m before each landmark, in English and Arabic.
+    for (const pl of route.places) {
+      if (pl.kind !== "poi" || pl.m === undefined) continue;
+      for (const k of route.loop ? [-1, 0, 1] : [0]) {
+        const d = pl.m - 200 + k * route.total - m0;
+        if (d < A + 40 || d > B - 40) continue;
+        const { a, pt } = place(d, city ? 9.0 : 9.6), g = new THREE.Group();
+        const mat = new THREE.MeshBasicMaterial({ map: tourSign(pl.name, pl.ar ?? ""), toneMapped: false, fog: true });
+        mat.userData.own = true; mat.userData.ownMap = true;
+        const board = new THREE.Mesh(new THREE.PlaneGeometry(5.6, 2.6), mat); board.position.set(0, 4.3, 0.03); g.add(board);
+        const back = new THREE.Mesh(new THREE.BoxGeometry(5.7, 2.7, 0.08), MAT.sign); back.position.set(0, 4.3, -0.02); back.castShadow = true; g.add(back);
+        for (const dx of [-2.1, 2.1]) { const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 4.3, 8), MAT.pole); leg.position.set(dx, 2.15, -0.08); leg.castShadow = true; g.add(leg); }
+        g.position.copy(pt); g.rotation.y = Math.atan2(-a.t.x, -a.t.z); add(g);
+      }
+    }
     // Green motorway distance signs every 5 km to the next stop (English + Arabic).
     const lm = wrapM(route, m0);
     const { stop, dist: toNext } = nextStop(route, lm);

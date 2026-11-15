@@ -58,6 +58,16 @@ export type Medal = "gold" | "silver" | "bronze";
 /** XP for each medal, and a bonus for a personal best. */
 export const MEDAL_XP: Record<Medal, number> = { gold: 150, silver: 100, bronze: 60 };
 export const PB_XP = 50;
+/** XP for each landmark the first time you reach it on a lap. */
+export const LANDMARK_XP = 40;
+
+/** Landmarks you've reached (name and when), stored on this device. */
+export function landmarkLog(): Array<{ name: string; at: number }> {
+  try { return JSON.parse(localStorage.getItem("el3.landmarks") || "[]"); } catch { return []; }
+}
+export function recordLandmark(name: string) {
+  try { const l = landmarkLog(); l.push({ name, at: Date.now() }); localStorage.setItem("el3.landmarks", JSON.stringify(l.slice(-1000))); } catch { /* storage unavailable */ }
+}
 
 /** The rival you race: your best time on this challenge, or a pacer a little quicker than your usual pace. */
 export interface Rival { name: string; time: number; isBest: boolean }
@@ -198,8 +208,8 @@ export class ChallengeRunner {
 }
 
 /** XP total and level from the challenge log plus distance ridden (10 XP per km). Level n needs 250·n·(n+1) XP. */
-export function xpLevel(log: Array<{ xp?: number }>, km: number) {
-  const xp = Math.round(log.reduce((a, e) => a + (e.xp ?? 0), 0) + km * 10);
+export function xpLevel(log: Array<{ xp?: number }>, km: number, landmarks = 0) {
+  const xp = Math.round(log.reduce((a, e) => a + (e.xp ?? 0), 0) + km * 10 + landmarks * LANDMARK_XP);
   let level = 1;
   while (xp >= 250 * level * (level + 1)) level++;
   const from = 250 * (level - 1) * level, to = 250 * level * (level + 1);
