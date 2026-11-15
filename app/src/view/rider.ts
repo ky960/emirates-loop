@@ -685,7 +685,59 @@ function segDist(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): [number,
 }
 const smooth = (e0: number, e1: number, x: number) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
 
-export function buildScanRider(src: THREE.Object3D): RiderModel | null {
+/**
+ * The Shadow Falcon's suit, painted onto the scan's own texture layout: a black suit with the scan's folds, a cowl with a
+ * glowing gold eye slit, a gold falcon on the chest, gold belt, piping and boot cuffs; the bike in gunmetal.
+ */
+export interface ScanSuit { map: THREE.Texture; glow: THREE.Texture }
+
+/** Smooth the scan's hair into a sleek cowl: relax the head above the brow, then point its normals outwards. */
+function cowlHead(geo: THREE.BufferGeometry) {
+  const pos = geo.getAttribute("position") as THREE.BufferAttribute, nrm = geo.getAttribute("normal") as THREE.BufferAttribute, idx = geo.getIndex();
+  if (!idx || !nrm) return;
+  const BROW = 0.775, n = pos.count;
+  // Weld UV-seam duplicates so the smoothing doesn't tear the surface apart.
+  const key = new Map<string, number>(), group = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = `${Math.round(pos.getX(i) * 1e4)},${Math.round(pos.getY(i) * 1e4)},${Math.round(pos.getZ(i) * 1e4)}`;
+    let gi = key.get(k); if (gi === undefined) { gi = key.size; key.set(k, gi); } group[i] = gi;
+  }
+  const G = key.size, gp = new Float32Array(G * 3), inHead = new Uint8Array(G), nb: number[][] = Array.from({ length: G }, () => []);
+  for (let i = 0; i < n; i++) { const g = group[i]; gp[g * 3] = pos.getX(i); gp[g * 3 + 1] = pos.getY(i); gp[g * 3 + 2] = pos.getZ(i); }
+  for (let g = 0; g < G; g++) inHead[g] = gp[g * 3 + 1] > BROW && Math.abs(gp[g * 3]) < 0.14 ? 1 : 0;
+  for (let t = 0; t < idx.count; t += 3) {
+    const a = group[idx.getX(t)], b = group[idx.getX(t + 1)], c = group[idx.getX(t + 2)];
+    if (!(inHead[a] || inHead[b] || inHead[c])) continue;
+    nb[a].push(b, c); nb[b].push(a, c); nb[c].push(a, b);
+  }
+  const tmp = new Float32Array(G * 3);
+  for (let it = 0; it < 14; it++) {
+    tmp.set(gp);
+    for (let g = 0; g < G; g++) {
+      if (!inHead[g] || !nb[g].length) continue;
+      // Fade in above the brow so the face below keeps its shape.
+      const w = 0.6 * smooth(BROW, BROW + 0.04, gp[g * 3 + 1]);
+      let sx = 0, sy = 0, sz = 0; for (const o of nb[g]) { sx += tmp[o * 3]; sy += tmp[o * 3 + 1]; sz += tmp[o * 3 + 2]; }
+      const k = nb[g].length;
+      gp[g * 3] += (sx / k - gp[g * 3]) * w; gp[g * 3 + 1] += (sy / k - gp[g * 3 + 1]) * w; gp[g * 3 + 2] += (sz / k - gp[g * 3 + 2]) * w;
+    }
+  }
+  // Centre of the cowl, for outward normals.
+  let cx = 0, cy = 0, cz = 0, cn = 0;
+  for (let g = 0; g < G; g++) if (inHead[g]) { cx += gp[g * 3]; cy += gp[g * 3 + 1]; cz += gp[g * 3 + 2]; cn++; }
+  if (!cn) return;
+  const c = new THREE.Vector3(cx / cn, cy / cn - 0.06, cz / cn), v = new THREE.Vector3(), o = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    const g = group[i]; if (!inHead[g]) continue;
+    pos.setXYZ(i, gp[g * 3], gp[g * 3 + 1], gp[g * 3 + 2]);
+    const w = smooth(BROW, BROW + 0.04, gp[g * 3 + 1]);
+    v.set(gp[g * 3], gp[g * 3 + 1], gp[g * 3 + 2]).sub(c).normalize();
+    o.fromBufferAttribute(nrm, i).lerp(v, w).normalize();
+    nrm.setXYZ(i, o.x, o.y, o.z);
+  }
+}
+
+export function buildScanRider(src: THREE.Object3D, suit?: ScanSuit): RiderModel | null {
   let mesh: THREE.Mesh | undefined;
   src.updateMatrixWorld(true);
   src.traverse((o) => { if ((o as THREE.Mesh).isMesh && !mesh) mesh = o as THREE.Mesh; });
@@ -693,6 +745,7 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
   const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
   const pos = geo.getAttribute("position"), person = geo.getAttribute("_leg");
   const n = pos.count;
+  if (suit) cowlHead(geo);
 
   // Bones: 0 static; then thigh, shin, foot for the right (1-3) and left (4-6) legs.
   const sides = [{ key: "right" as const, sg: -1, phase: 0 }, { key: "left" as const, sg: 1, phase: Math.PI }];
@@ -759,6 +812,11 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
   for (const b of bones) body.add(b);
   const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
   mat.metalness = 0; mat.roughness = 0.75; mat.flatShading = false;
+  if (suit) {
+    // Satin suit fabric, with the eyes, emblem and trim lit from within.
+    mat.map = suit.map; mat.emissiveMap = suit.glow; mat.emissive = new THREE.Color(0xffffff); mat.emissiveIntensity = 1.6;
+    mat.roughness = 0.5; mat.metalness = 0.15;
+  }
   const skinned = new THREE.SkinnedMesh(geo, mat);
   skinned.castShadow = true; skinned.receiveShadow = true; skinned.frustumCulled = false;
   body.add(skinned);
@@ -767,6 +825,8 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
 
   // Wheels: dark tyres on black rims with thin spokes, turning on their hubs.
   const tyreM = new THREE.MeshStandardMaterial({ color: 0x1a1a1c, roughness: 0.85 });
+  // The hero's wheels carry a thin glowing gold ring.
+  const heroRing = suit ? new THREE.MeshBasicMaterial({ color: 0xffb020, toneMapped: false }) : undefined;
   const rimM = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.4, metalness: 0.6 });
   const spokeM = new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.35, metalness: 0.8 });
   const wheels: THREE.Group[] = [];
@@ -777,6 +837,7 @@ export function buildScanRider(src: THREE.Object3D): RiderModel | null {
     const rim = new THREE.Mesh(new THREE.TorusGeometry(SCAN.tyre - 0.045, 0.011, 6, 56), rimM); rim.rotation.y = Math.PI / 2;
     const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.1, 12), rimM); hub.rotation.z = Math.PI / 2;
     w.add(tyre, rim, hub);
+    if (heroRing) { const glowRing = new THREE.Mesh(new THREE.TorusGeometry(SCAN.tyre - 0.06, 0.004, 6, 64), heroRing); glowRing.rotation.y = Math.PI / 2; w.add(glowRing); }
     const spokeGeo = new THREE.CylinderGeometry(0.0018, 0.0018, SCAN.tyre - 0.06, 4).translate(0, (SCAN.tyre - 0.06) / 2, 0);
     for (let k = 0; k < 28; k++) {
       const sp = new THREE.Mesh(spokeGeo, spokeM);

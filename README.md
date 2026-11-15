@@ -15,7 +15,7 @@ Built for one rider on a Samsung Galaxy Tab S7+ in Chrome, with a CYCPLUS speed/
 - **Challenges:** real climbs, plus a sprint or a 60-second cadence/speed hold every few kilometres. Inflatable arches, a 3-2-1 countdown, a gold rival on the road (a pacer, then your best), a live gap, and gold/silver/bronze medals with confetti, fanfare and XP towards your level.
 - **Badges and streaks:** 30 badges (distance, every stage, climbing, long rides, streaks, challenges), shown in History.
 - **Time of day:** your clock, sunrise, midday, sunset, night (lit towers, lamplight, stars), or a day passing as you ride.
-- **Night-hero mode:** ride as the Shadow Falcon, a masked hero in full armour on a dark bike with a headlight that lights the road, at night under the falcon signal, against comic villains (Sandstorm, The Mirage, Doctor Dune, Captain Haboob, Scorpia, The Tar Baron) who ride in their colours, taunt you and complain when you pass. Chosen at startup or in Settings. All characters are original to this app.
+- **Night-hero mode:** ride as the Shadow Falcon: the same photo-real rider in a black hero suit with a cowl, a glowing gold eye slit, a gold falcon on the chest and gold trim, on a gunmetal bike with glowing gold wheel rings and a headlight that lights the road, at night under the falcon signal, against comic villains (Sandstorm, The Mirage, Doctor Dune, Captain Haboob, Scorpia, The Tar Baron) who ride in their colours, taunt you and complain when you pass. Chosen at startup or in Settings. All characters are original to this app.
 - **Ghost:** replays your best ride second by second.
 - **Trustworthy data:**
   - Ride time comes from the clock, not the screen's frame rate, and distance from the sensor.
@@ -55,7 +55,7 @@ Both share the same origin, so the new app imports the old app's settings and ri
 ## Asset credits
 
 - `app/public/env/quarry_01_1k.hdr`: "Quarry 01" HDRI by Poly Haven (CC0), via the three.js examples.
-- `app/public/tex/*`: procedurally generated for this app (CC0).
+- `app/public/tex/*`: procedurally generated for this app (CC0); `falcon_*.webp` is the Shadow Falcon's suit, painted onto the scanned rider's texture layout.
 - `app/public/models/*`: 3D models from Sketchfab under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Each was compressed (meshopt geometry, WebP textures, some mesh simplification). The cyclist also gets a painted-on jersey, a helmet and pedalling legs in code, and the Camry's interior was dropped.
   - `cyclist.glb`: ["Rigged cyclist"](https://sketchfab.com/3d-models/rigged-cyclist-ff9f413898844f1d8ee7318f048b3619) by novusod
   - `date_palm.glb`: ["Date Palm"](https://sketchfab.com/3d-models/date-palm-11acf710e6c149daa8d6fb8cdc5d087f) by evolveduk
@@ -70,4 +70,4 @@ Both share the same origin, so the new app imports the old app's settings and ri
   - `dhow.glb`: ["Low Poly Ancient Dhow Ship"](https://sketchfab.com/3d-models/low-poly-ancient-dhow-ship-f25b4552dce24d379833160dd217db84) by Nisa Nurul Azizah
   - `camel.glb`: ["camel"](https://sketchfab.com/3d-models/camel-44ef2ea4b50a49e395e5e3ebbdc99f98) by omarme37
   - `rider_scan.glb` (your rider): ["Urban Cyclist With Backpack"](https://sketchfab.com/3d-models/urban-cyclist-with-backpack-9bbcb7c17ffc412c9f07c975adb2c440) by restore50 (simplified from 760k to 84k triangles; the scanned wheels and crankset replaced with turning ones, and the legs skinned in code so they pedal)
-  - `hero_body.glb` (the Shadow Falcon): ["Humanoid Avatar with Rig"](https://sketchfab.com/3d-models/humanoid-avatar-with-rig-995558e2514644909c9037b0e7762855) by 3DStory (animation removed, armour recoloured from blue to dark gunmetal; posed in code to ride the bike)
+  - `hero_body.glb` (the Shadow Falcon): ["Humanoid Avatar with Rig"](https://sketchfab.com/3d-models/humanoid-avatar-with-rig-995558e2514644909c9037b0e7762855) by 3DStory (animation removed, armour recoloured from blue to dark gunmetal; posed in code to ride the bike; now only a fallback while the suit loads)
