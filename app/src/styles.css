@@ -59,7 +59,7 @@ body.sim .stage { height: calc(100dvh - 258px) }
 #map { position: absolute; inset: 0 }
 #road { position: absolute; inset: 0; width: 100%; height: 100%; display: block }
 .stage:not(.roadmode) #road { display: none }
-.stage.roadmode #map { inset: auto auto 74px 14px; width: 280px; height: 190px; border-radius: 16px; border: 2px solid rgba(255, 255, 255, .65); box-shadow: 0 10px 28px rgba(0, 0, 0, .35); z-index: 2 }
+.stage.roadmode #map { inset: auto auto 74px 14px; width: 190px; height: 130px; border-radius: 16px; border: 2px solid rgba(255, 255, 255, .65); box-shadow: 0 10px 28px rgba(0, 0, 0, .35); z-index: 2 }
 .stage.roadmode .city.poi { display: none }
 .stage.roadmode .city span { font-size: 11px; padding: 2px 6px }
 .stage::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(130% 100% at 50% 60%, transparent 62%, rgba(6, 12, 16, .32) 100%); z-index: 1 }
@@ -98,7 +98,7 @@ body.sim .stage { height: calc(100dvh - 258px) }
 .camsw button { font: 700 14px var(--display); letter-spacing: .08em; text-transform: uppercase; color: #fff; background: transparent; border: 0; border-radius: 11px; min-width: 72px; min-height: var(--tap); padding: 8px 12px; cursor: pointer }
 .camsw button[aria-pressed="true"] { background: rgba(242, 154, 74, .95); color: #1a1206 }
 
-.hud { position: absolute; right: 14px; bottom: 74px; z-index: 3; display: flex; align-items: stretch; border-radius: 14px; max-width: calc(100% - 320px); pointer-events: none; overflow: hidden }
+.hud { position: absolute; right: 14px; bottom: 74px; z-index: 3; display: flex; align-items: stretch; border-radius: 14px; max-width: calc(100% - 230px); pointer-events: none; overflow: hidden }
 .hud .cell { padding: 6px 12px; display: grid; gap: 3px; line-height: 1; min-width: 0; align-content: center }
 .hud .cell + .cell { border-left: 1px solid rgba(255, 255, 255, .14) }
 .hud small { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; opacity: .75; white-space: nowrap }
@@ -108,7 +108,7 @@ body.sim .stage { height: calc(100dvh - 258px) }
 .hud .main strong { font-size: 36px; color: #ffc58a }
 .hud .zbar { height: 3px; border-radius: 3px; background: rgba(255, 255, 255, .16); overflow: hidden }
 .hud .zbar i { display: block; height: 100%; width: 0; background: var(--muted); transition: width .4s, background .4s }
-.stage.roadmode .hud { max-width: calc(100% - 330px) }
+.stage.roadmode .hud { max-width: calc(100% - 240px) }
 .stage:not(.roadmode) .hud { max-width: calc(100% - 28px) }
 
 .profile { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 3; height: 50px; border-radius: 14px; pointer-events: none; padding: 0 14px; display: flex; align-items: center; gap: 12px }
@@ -148,7 +148,7 @@ body.sim .stage { height: calc(100dvh - 258px) }
   .hud strong { font-size: 20px }
   .hud strong em { font-size: 9px; margin-left: 2px }
   .hud .main strong { font-size: 30px }
-  .stage.roadmode #map { inset: 132px 14px auto auto; width: 180px; height: 132px }
+  .stage.roadmode #map { inset: auto auto 146px 14px; width: 130px; height: 96px }
   .camsw { top: auto; left: 14px; bottom: 140px; transform: none }
   .next { max-width: 62% }
 }
@@ -315,3 +315,7 @@ body.hero .chip.ghostc i { background: #ffc400; box-shadow: 0 0 8px #ffc400 }
 .sight .ico { grid-row: span 2; font-size: 28px }
 .sight b { font-size: 15px } .sight small { color: var(--muted); font-size: 12px }
 .banner.withfact { top: 47% }
+
+/* While riding, the camera switcher is hidden for a clean view (it comes back when paused or stopped). */
+body.riding:not(.paused) .camsw { display: none }
+body.riding:not(.paused) .race { top: 18px }

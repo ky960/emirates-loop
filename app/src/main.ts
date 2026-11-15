@@ -396,6 +396,7 @@ function zoneBar(z: number[]): string {
 
 engine.on("state", (s: RideState) => {
   document.body.classList.toggle("riding", s !== "idle");
+  document.body.classList.toggle("paused", s === "paused" || s === "autopaused");
   $("pausedOv").hidden = !(s === "paused" || s === "autopaused");
   $("pausedSub").textContent = s === "autopaused" ? "Pedal to resume" : "Tap Resume to continue";
   renderControls();
