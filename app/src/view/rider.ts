@@ -26,6 +26,8 @@ export interface Look {
   bikeColor: number;
   /** Gold falcon emblem on the chest. */
   emblem?: boolean;
+  /** Armour: chest plate, shoulder guards, gauntlets, shin guards and a belt, in this colour (with gold trim). */
+  armor?: number;
   /** Headlight beam (the hero only: it's a real light). */
   light?: boolean;
 }
@@ -303,8 +305,17 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       cowl.scale.set(0.95, 1.08, 1.12); cowl.position.set(0, 0.04, -0.012); hat.add(cowl);
       if (L.head === "cowl") {
         // A swept-back crest, like a falcon's: not ears.
-        const crest = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.2, 4), headMat);
-        crest.scale.set(0.35, 1, 1.6); crest.rotation.x = -1.25; crest.position.set(0, 0.15, -0.09); hat.add(crest);
+        const crest = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.26, 4), headMat);
+        crest.scale.set(0.35, 1, 1.6); crest.rotation.x = -1.25; crest.position.set(0, 0.16, -0.1); hat.add(crest);
+        // Falcon brow: a sharp beak-like ridge over the visor, and swept cheek guards.
+        const brow = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.11, 4), headMat);
+        brow.scale.set(1.6, 1, 0.5); brow.rotation.x = Math.PI / 2 + 0.55; brow.position.set(0, 0.085, 0.115); hat.add(brow);
+        for (const sd of [-1, 1]) {
+          const cheek = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.09, 0.11), headMat);
+          cheek.position.set(sd * 0.1, 0.0, 0.035); cheek.rotation.set(0.35, sd * 0.25, sd * -0.12); hat.add(cheek);
+          const wing = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.12, 3), M(0x8a6a10, { m: 0.9, r: 0.3 }));
+          wing.position.set(sd * 0.105, 0.07, -0.04); wing.rotation.set(-1.1, 0, sd * 0.5); hat.add(wing);
+        }
       } else {
         const peak = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.16, 16), headMat);
         peak.rotation.x = -0.9; peak.position.set(0, 0.1, -0.1); hat.add(peak);
@@ -335,9 +346,10 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       wing.moveTo(0, -0.03); wing.lineTo(0.09, 0.035); wing.lineTo(0.05, 0.03); wing.lineTo(0.075, 0.06); wing.lineTo(0.02, 0.035); wing.lineTo(0, 0.07);
       wing.lineTo(-0.02, 0.035); wing.lineTo(-0.075, 0.06); wing.lineTo(-0.05, 0.03); wing.lineTo(-0.09, 0.035); wing.closePath();
       const em = new THREE.Mesh(new THREE.ShapeGeometry(wing), new THREE.MeshStandardMaterial({ color: 0xffc400, metalness: 0.9, roughness: 0.25, emissive: new THREE.Color(0xffa000), emissiveIntensity: 0.6, side: THREE.DoubleSide }));
-      em.position.set(0, 0.05, 0.14); em.rotation.x = -0.25;
+      em.position.set(0, 0.05, L.armor !== undefined ? 0.165 : 0.14); em.rotation.x = -0.25;
       pv.add(em);
     }
+    if (L.armor !== undefined) armour(L.armor);
     // Cape: cloth hanging from the shoulders, streaming back with speed.
     if (L.cape !== undefined && bodyBones.Neck) {
       const SEG_X = 6, SEG_Y = 10, geo = new THREE.PlaneGeometry(1, 1, SEG_X, SEG_Y);
@@ -359,8 +371,8 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
         const flap = Math.min(1, mps / 6) * 0.07;
         for (let i = 0; i < pos.count; i++) {
           const u = base[i * 3], v = 0.5 - base[i * 3 + 1]; // u -0.5..0.5 across, v 0 (top) .. 1 (hem)
-          const w = 0.36 + 0.32 * v, len = 1.05;
-          const ripple = Math.sin(t * 9 - v * 5 + u * 2) * flap * v + Math.sin(t * 4.3 + u * 6) * 0.015 * v;
+          const heavy = L.armor !== undefined, w = heavy ? 0.42 + 0.42 * v : 0.36 + 0.32 * v, len = heavy ? 1.3 : 1.05;
+          const ripple = (Math.sin(t * 9 - v * 5 + u * 2) * flap * v + Math.sin(t * 4.3 + u * 6) * 0.015 * v) * (heavy ? 0.7 : 1);
           const sag = v * v * 0.12 * (1 - Math.min(1, mps / 11));
           pos.setXYZ(i, anchor.x + u * w, anchor.y + down.y * v * len - sag + nrm.y * ripple, anchor.z + down.z * v * len + nrm.z * ripple);
         }
@@ -398,6 +410,51 @@ export function buildModelRider(gltf: { scene: THREE.Group }, kit: RiderKit = DE
       flame.rotation.x = -Math.PI / 2; flame.position.set(sd * 0.09, 0.62, -1.0); scene.add(flame); jets.push(flame);
     }
     jetUpdate = (mps: number) => { const k = Math.min(1, mps / 12); for (const j of jets) { j.scale.set(0.6 + k * 0.6, 0.3 + k * (1.4 + Math.random() * 0.3), 0.6 + k * 0.6); j.position.z = -0.9 - j.scale.y * 0.2; } };
+  }
+  /** Armour plates that move with the body: chest, shoulders, forearms, shins, belt. */
+  function armour(col: number) {
+    const B = bodyBones;
+    const plate = new THREE.MeshStandardMaterial({ color: col, metalness: 0.75, roughness: 0.3 });
+    const gold = new THREE.MeshStandardMaterial({ color: 0xd9a514, metalness: 0.95, roughness: 0.25, emissive: new THREE.Color(0x5a3a00), emissiveIntensity: 0.4 });
+    const add = (pv: THREE.Object3D, geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, sx = 1, sy = 1, sz = 1, rx = 0) => {
+      const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.scale.set(sx, sy, sz); m.rotation.x = rx; m.castShadow = true; pv.add(m); return m;
+    };
+    if (B.Spine2) {
+      const chest = follow(B.Spine2);
+      // A broad, flat chest plate with a centre ridge (a shallow shell, not a dome).
+      add(chest, new THREE.SphereGeometry(0.15, 20, 14, 0, TAU, 0, Math.PI * 0.5), plate, 0, 0.0, 0.035, 1.22, 0.62, 1.0, Math.PI / 2 - 0.1); // dome axis forward, squashed along it
+      add(chest, new THREE.BoxGeometry(0.012, 0.13, 0.02), plate, 0, 0.0, 0.122);
+      add(chest, new THREE.BoxGeometry(0.2, 0.012, 0.02), gold, 0, -0.035, 0.135); // gold rib across the plate
+    }
+    if (B.Spine) {
+      const abs = follow(B.Spine);
+      for (let k = 0; k < 3; k++) add(abs, new THREE.BoxGeometry(0.15 - k * 0.012, 0.035, 0.03), plate, 0, 0.1 - k * 0.045, 0.115 - k * 0.004);
+    }
+    if (B.Hips) {
+      const hips = follow(B.Hips);
+      add(hips, new THREE.TorusGeometry(0.12, 0.016, 8, 28), gold, 0, 0.07, 0.01, 1.0, 1.0, 1.0, Math.PI / 2).scale.set(1.1, 0.82, 1);
+      add(hips, new THREE.BoxGeometry(0.05, 0.045, 0.02), gold, 0, 0.07, 0.108);
+      for (const sd of [-1, 1]) add(hips, new THREE.BoxGeometry(0.035, 0.04, 0.025), plate, sd * 0.085, 0.065, 0.085);
+    }
+    for (const side of ["Left", "Right"]) {
+      const arm = B[side + "Arm"], fore = B[side + "ForeArm"], hand = B[side + "Hand"], leg = B[side + "Leg"], foot = B[side + "Foot"];
+      if (arm) { const sh = follow(arm); add(sh, new THREE.SphereGeometry(0.085, 16, 10, 0, TAU, 0, Math.PI / 2), plate, 0, 0.0, 0, 1.15, 0.85, 1.25); }
+      if (fore && hand) limb(fore, hand, new THREE.CylinderGeometry(0.048, 0.04, 1, 12), plate, 0.62, 0.62);
+      if (fore && hand) limb(fore, hand, new THREE.CylinderGeometry(0.05, 0.05, 1, 12), gold, 0.92, 0.06);
+      if (leg && foot) limb(leg, foot, new THREE.CylinderGeometry(0.058, 0.066, 1, 12), plate, 0.62, 0.62);
+    }
+  }
+  /** A piece along a limb, from bone a to bone b: centred at t (0..1) and `len` of the limb long. */
+  function limb(a: THREE.Object3D, b: THREE.Object3D, geo: THREE.BufferGeometry, mat: THREE.Material, t: number, len: number) {
+    const m = new THREE.Mesh(geo, mat); m.castShadow = true; scene.add(m);
+    const pa = new THREE.Vector3(), pb = new THREE.Vector3(), d = new THREE.Vector3(), Y = new THREE.Vector3(0, 1, 0);
+    followers.push(() => {
+      a.getWorldPosition(pa); scene.worldToLocal(pa); b.getWorldPosition(pb); scene.worldToLocal(pb);
+      d.subVectors(pb, pa); const L = d.length();
+      m.position.copy(pa).addScaledVector(d, t);
+      m.quaternion.setFromUnitVectors(Y, d.normalize());
+      m.scale.set(1, L * len, 1);
+    });
   }
   /** A group that follows a bone (position and turn since the rest pose), for things worn on the body. */
   function follow(bone: THREE.Object3D) {

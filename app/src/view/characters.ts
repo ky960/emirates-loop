@@ -8,7 +8,7 @@ import { DEFAULT_KIT } from "./rider";
 export const HERO_NAME = "Shadow Falcon";
 export const HERO: RiderKit = {
   ...DEFAULT_KIT,
-  look: { suit: 0x23252b, trim: 0x111114, cape: 0x14151a, capeLining: 0x8a6a10, head: "cowl", eyes: 0xffc400, bike: "hero", bikeColor: 0x1a1b20, emblem: true, light: true },
+  look: { suit: 0x23252b, trim: 0x111114, cape: 0x14151a, capeLining: 0x8a6a10, head: "cowl", eyes: 0xffc400, bike: "hero", bikeColor: 0x1a1b20, emblem: true, light: true, armor: 0x2c2f37 },
 };
 
 export interface Villain { name: string; look: Look; taunts: string[]; beaten: string[] }
