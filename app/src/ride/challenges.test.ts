@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { flatProfile, processProfile } from "../elevation";
 import { buildApproxLoop } from "../route";
-import { ChallengeRunner, planChallenges, type ChallengeKind, type ChallengeStore } from "./challenges";
+import { ChallengeRunner, MEDAL_XP, planChallenges, xpLevel, type ChallengeEvent, type ChallengeKind, type ChallengeStore } from "./challenges";
 
 const route = buildApproxLoop();
 
@@ -33,7 +33,7 @@ describe("challenges", () => {
       pos += 10 * 0.1; // 36 km/h
       for (const e of run.update(0.1, { pos, kmh: 36, rpm: 90, riding: true }).events) events.push(e.type);
     }
-    expect(events).toEqual(["approach", "start", "finish"]);
+    expect(events).toEqual(["approach", "countdown", "countdown", "countdown", "start", "finish"]);
     const t = store.rec[0][2]!;
     expect(t).toBeCloseTo((sprint.m1 - sprint.m0) / 10, 0);
   });
@@ -58,5 +58,40 @@ describe("challenges", () => {
     run.update(0.1, { pos: sprint.m0 + 1, kmh: 30, rpm: 85, riding: true });
     const r = run.update(0.1, { pos: sprint.m0 + 2, kmh: 0, rpm: 0, riding: false });
     expect(r.events[0]?.type).toBe("fail");
+  });
+
+  it("races a rival: a pacer the first time, your best after that, with medals and XP", () => {
+    const list = planChallenges(route, flatProfile(route)), sprint = list.find((c) => c.kind === "sprint")!;
+    const store = memStore();
+    const ride = (kmh: number) => {
+      const run = new ChallengeRunner(() => list, () => route, store);
+      // Warm up at 30 km/h so the pacer is set from that.
+      for (let i = 0; i < 3000; i++) run.update(0.1, { pos: 0, kmh: 30, rpm: 85, riding: true });
+      let pos = sprint.m0 - 300;
+      const ev: ChallengeEvent[] = [];
+      let sawGap = false;
+      while (pos < sprint.m1 + 20) { pos += (kmh / 3.6) * 0.1; const r = run.update(0.1, { pos, kmh, rpm: 90, riding: true }); ev.push(...r.events); if (r.status?.live?.gap !== undefined) sawGap = true; }
+      return { ev, sawGap };
+    };
+    const first = ride(36);
+    const start = first.ev.find((e) => e.type === "start") as Extract<ChallengeEvent, { type: "start" }>;
+    expect(start.rival?.isBest).toBe(false); // a pacer at ~32 km/h
+    expect(first.sawGap).toBe(true);
+    const fin = first.ev.find((e) => e.type === "finish") as Extract<ChallengeEvent, { type: "finish" }>;
+    expect(fin.medal).toBe("gold"); // 36 km/h beats the pacer
+    expect(fin.xp).toBe(MEDAL_XP.gold);
+    // Next time your best is the rival; going slower gets bronze, and you hear the rival pass you.
+    const second = ride(28);
+    const s2 = second.ev.find((e) => e.type === "start") as Extract<ChallengeEvent, { type: "start" }>;
+    expect(s2.rival?.isBest).toBe(true);
+    const f2 = second.ev.find((e) => e.type === "finish") as Extract<ChallengeEvent, { type: "finish" }>;
+    expect(f2.medal).toBe("bronze");
+  });
+
+  it("works out XP and levels", () => {
+    expect(xpLevel([], 0)).toMatchObject({ level: 1, xp: 0, need: 500 });
+    const l = xpLevel([{ xp: 150 }, { xp: 100 }], 30); // 250 + 300
+    expect(l.level).toBe(2);
+    expect(l.into).toBe(50);
   });
 });

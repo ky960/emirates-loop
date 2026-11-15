@@ -332,6 +332,10 @@ function makeShared() {
     flower: std(0xffffff, { r: 0.95 }),
     pool: new THREE.MeshBasicMaterial({ map: lampPoolTexture(), color: 0xffd39a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }),
     checkB: std(0x1b1b1e, { r: 0.6, x: off(-6) }),
+    archStart: std(0x8a2be2, { r: 0.45, x: { emissive: new THREE.Color(0x3a0a5c), emissiveIntensity: 0.4 } }),
+    archStartB: std(0xf0622e, { r: 0.45, x: { emissive: new THREE.Color(0x5c1a0a), emissiveIntensity: 0.4 } }),
+    archFinish: std(0xf2f2f2, { r: 0.45 }),
+    archFinishB: std(0x17171a, { r: 0.5 }),
     glass: new THREE.MeshStandardMaterial({ color: 0xbcd6de, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }),
     shelter: std(0xd9dcde, { r: 0.4, m: 0.6 }),
     flag: (() => {
@@ -349,6 +353,10 @@ function makeShared() {
   GEO.bay = new THREE.BoxGeometry(0.12, 0.01, 5.4); // parking bay line, lengthwise across the road direction
   GEO.zebra = new THREE.BoxGeometry(0.5, 0.01, 3.2); // crossing stripe, lengthwise along the road
   GEO.check = new THREE.BoxGeometry(0.5, 0.01, 0.5); // chequered challenge line square
+  // Inflatable challenge arch: two puffy posts, a puffy beam, and a banner on each face.
+  GEO.archPost = new THREE.CapsuleGeometry(0.55, 5.2, 6, 14).translate(0, 2.95, 0);
+  GEO.archBeam = new THREE.CapsuleGeometry(0.6, 8.6, 6, 14).rotateZ(Math.PI / 2);
+  GEO.archBanner = new THREE.PlaneGeometry(7.2, 0.95);
   GEO.pool = new THREE.PlaneGeometry(11, 11).rotateX(-Math.PI / 2); // light on the road under a street lamp
   GEO.flower = new THREE.IcosahedronGeometry(1, 1);
   GEO.flag = new THREE.PlaneGeometry(1.6, 0.8, 16, 4).translate(0.8, 0, 0); // hoist edge at x = 0
@@ -440,6 +448,25 @@ function tuneEnv() {
     if (!("envMapIntensity" in sm)) continue;
     sm.envMapIntensity = k === "facade_glass" ? 1.3 : k === "wbeam" || k === "gantry" || k === "gpost" ? 0.9 : k.startsWith("facade") ? 0.5 : 0.35;
   }
+}
+
+/** Banner on a challenge arch (cached by text; shared, never disposed). */
+const ARCH_LABELS = new Map<string, THREE.Material>();
+function archLabel(text: string, finish: boolean): THREE.Material {
+  const key = text + finish;
+  let m = ARCH_LABELS.get(key);
+  if (!m) {
+    const t = rTex(1024, 136, (c, w, h) => {
+      if (finish) { for (let x = 0; x < w; x += 34) for (let y = 0; y < h; y += 34) { c.fillStyle = (x / 34 + y / 34) % 2 ? "#111" : "#f4f4f4"; c.fillRect(x, y, 34, 34); } c.fillStyle = "rgba(17,17,17,.88)"; c.fillRect(w * 0.22, 14, w * 0.56, h - 28); }
+      else { const g = c.createLinearGradient(0, 0, w, 0); g.addColorStop(0, "#6b1fb8"); g.addColorStop(1, "#f0622e"); c.fillStyle = g; c.fillRect(0, 0, w, h); }
+      c.fillStyle = "#fff"; c.font = `800 ${finish ? 84 : 78}px 'Barlow Condensed', 'Arial Narrow', sans-serif`; c.textAlign = "center"; c.textBaseline = "middle";
+      c.fillText(text, w / 2, h / 2 + 4);
+    });
+    t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+    m = new THREE.MeshBasicMaterial({ map: t, toneMapped: false, side: THREE.FrontSide });
+    ARCH_LABELS.set(key, m);
+  }
+  return m;
 }
 
 function signBoard(name: string, km: number) {
@@ -556,6 +583,13 @@ class Traffic {
 
 /** A camera position around the rider: angle from straight ahead (toward the right), distance, height; where it looks. */
 interface Shot { az: number; back: number; up: number; ahead: number; lookH: number }
+/** Blend two shots, swinging the short way round the rider. */
+function blendShot(a: Shot, b: Shot, k: number): Shot {
+  let dAz = b.az - a.az;
+  dAz = ((dAz + Math.PI) % TAU + TAU) % TAU - Math.PI;
+  const L = THREE.MathUtils.lerp;
+  return { az: a.az + dAz * k, back: L(a.back, b.back, k), up: L(a.up, b.up, k) + Math.sin(k * Math.PI) * 0.8, ahead: L(a.ahead, b.ahead, k), lookH: L(a.lookH, b.lookH, k) };
+}
 
 // =====================================================================================
 export class RoadView {
@@ -575,6 +609,14 @@ export class RoadView {
   private yaw: number | undefined;
   private camOff: THREE.Vector3 | null = null;
   private shotT = 0;
+  /** 0..1: during a sprint or climb the camera widens a little for a sense of speed. */
+  raceBoost = 0;
+  private boostNow = 0;
+  private baseFov = 52;
+  private celebrateT = 0;
+  private celebrateDur = 4;
+  /** Swing the camera round to the front of the rider for `secs` (a finish celebration). */
+  celebrate(secs: number) { this.celebrateT = this.celebrateDur = secs; }
   /**
    * Cinematic camera: a minute of the chase view, then an aerial, a side and a front shot, gliding between them.
    * Shots are positions on a circle around the rider (angle, distance, height) so a change swings the camera round
@@ -627,7 +669,7 @@ export class RoadView {
   })();
 
   constructor(private canvas: HTMLCanvasElement, private deps: { route: () => Route; profile: () => ElevationProfile; settings: () => Settings; osm: OsmTiles; osmFar?: OsmTiles; pack?: () => Bot[];
-    /** Challenge start/finish lines, metres along one lap. */ marks?: () => number[] }) {
+    /** Challenge start and finish lines (metres along one lap), with an arch over the road. */ marks?: () => Array<{ m: number; label: string; finish: boolean }> }) {
     this.quality = deps.settings().quality;
   }
 
@@ -706,7 +748,7 @@ export class RoadView {
     if (!this.ready) return;
     this.renderer.setSize(Math.max(200, w), Math.max(150, h), false);
     this.cam.aspect = w / h;
-    this.cam.fov = w / h < 1.1 ? 66 : 52;
+    this.cam.fov = this.baseFov = w / h < 1.1 ? 66 : 52;
     this.cam.updateProjectionMatrix();
   }
 
@@ -1109,8 +1151,8 @@ export class RoadView {
     add(inst(GEO.ghafWood, MAT.ghafT, it.ghafW)); add(inst(GEO.ghafCanopy, MAT.ghafC, it.ghafCan)); add(inst(GEO.shrub, MAT.shrub, it.shrub, false));
     add(inst(GEO.rock, MAT.rock, it.rock));
     // Chequered start and finish lines for the challenges, across your carriageway.
-    for (const L of this.deps.marks?.() ?? []) {
-      const lapN = Math.floor((m0 + A - L) / route.total);
+    for (const mk of this.deps.marks?.() ?? []) {
+      const L = mk.m, lapN = Math.floor((m0 + A - L) / route.total);
       for (const n of route.loop ? [lapN, lapN + 1] : [0]) {
         const d = L + n * route.total - m0;
         if (d < A + 20 || d > B - 20) continue;
@@ -1119,6 +1161,15 @@ export class RoadView {
           const pt = a.p.clone().addScaledVector(a.n, -3.5 + k * 0.5 + 0.25).addScaledVector(a.t, row * 0.5);
           ((k + row) % 2 ? it.checkB : it.checkW).push({ x: pt.x, y: a.p.y + 0.107, z: pt.z, ry });
         }
+        // Inflatable arch over the carriageway, banner facing you as you ride up.
+        const arch = new THREE.Group(), [cA, cB] = mk.finish ? [MAT.archFinish, MAT.archFinishB] : [MAT.archStart, MAT.archStartB];
+        for (const x of [-4.4, 4.4]) { const post = new THREE.Mesh(GEO.archPost, cA); post.position.set(x, 0, 0); post.castShadow = true; arch.add(post); }
+        const beam = new THREE.Mesh(GEO.archBeam, cB); beam.position.y = 5.4; beam.castShadow = true; arch.add(beam);
+        const banner = new THREE.Mesh(GEO.archBanner, archLabel(mk.label, mk.finish)); banner.position.set(0, 5.4, 0.62); arch.add(banner);
+        const back = new THREE.Mesh(GEO.archBanner, archLabel(mk.label, mk.finish)); back.position.set(0, 5.4, -0.62); back.rotation.y = Math.PI; arch.add(back);
+        arch.position.copy(a.p); arch.position.y += 0.1;
+        arch.rotation.y = Math.atan2(-a.t.x, -a.t.z); // banner's front faces riders coming up the road
+        add(arch);
       }
     }
     add(inst(GEO.check, MAT.white, it.checkW, false)); add(inst(GEO.check, MAT.checkB, it.checkB, false));
@@ -1433,7 +1484,17 @@ export class RoadView {
     const fwd = V3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)), right = V3(-fwd.z, 0, fwd.x), portrait = this.cam.aspect < 1.1, sp = Math.min(1.4, mps / 9);
     // Chase view (the usual road view): behind and a little to the right, looking up the road.
     const chase = { az: Math.atan2(portrait ? 0.8 : 1.2, -(portrait ? 4.4 : 5.2) - sp * 0.6), back: Math.hypot(portrait ? 0.8 : 1.2, (portrait ? 4.4 : 5.2) + sp * 0.6), up: portrait ? 2.3 : 1.95, ahead: 9, lookH: 1.05 };
-    const shot = this.deps.settings().cinematic ? this.director(dt, chase) : chase;
+    let shot = this.deps.settings().cinematic ? this.director(dt, chase) : chase;
+    // Finish celebration: swing round to the front of the rider for a few seconds, then back.
+    if (this.celebrateT > 0) {
+      this.celebrateT = Math.max(0, this.celebrateT - dt);
+      const k = Math.min(smoothstep(this.celebrateDur, this.celebrateDur - 1.2, this.celebrateT), smoothstep(0, 1.4, this.celebrateT));
+      shot = blendShot(shot, { az: 0.42, back: 5.8, up: 1.5, ahead: 0, lookH: 1.15 }, k);
+    }
+    // Racing: widen the view a touch for a sense of speed.
+    this.boostNow += (this.raceBoost - this.boostNow) * Math.min(1, dt * 2);
+    const fov = this.baseFov + this.boostNow * 7;
+    if (Math.abs(this.cam.fov - fov) > 0.05) { this.cam.fov = fov; this.cam.updateProjectionMatrix(); }
     // Camera on a circle around the rider: az is the angle from straight ahead toward the right.
     const want = rp.clone().addScaledVector(fwd, Math.cos(shot.az) * shot.back).addScaledVector(right, Math.sin(shot.az) * shot.back);
     want.y = rp.y + shot.up + Math.sin(this.t * 0.4) * 0.05;

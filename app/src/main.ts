@@ -4,7 +4,10 @@ import { climbBetween, demProfile, gradeAt, flatProfile, gpxProfile, processProf
 import { RideEngine, type Frame, type RideState } from "./ride/engine";
 import { Ghost, pickBest } from "./ride/ghost";
 import { Pack } from "./ride/pack";
-import { ChallengeRunner, fmtSecs, localChallengeStore, planChallenges, type Challenge } from "./ride/challenges";
+import { ChallengeRunner, fmtSecs, localChallengeStore, planChallenges, xpLevel, type Challenge, type Medal } from "./ride/challenges";
+import { powerFor, speedFor } from "./physics";
+import type { Bot } from "./ride/pack";
+import { Confetti } from "./ui/confetti";
 import { badges, newlyEarned, type Badge } from "./ride/badges";
 import { ZONE_COLORS, ZONE_NAMES } from "./ride/metrics";
 import type { RideRecord } from "./ride/types";
@@ -46,8 +49,15 @@ const challenges = () => {
 };
 const runner = new ChallengeRunner(challenges, () => route, {
   best: challengeStore.best,
-  record: (id, kind, t) => { if (!engine.current.sim) { challengeStore.record(id, kind, t); setTimeout(checkBadges, 6500); } },
+  record: (id, kind, t, medal, xp) => { if (!engine.current.sim) { challengeStore.record(id, kind, t, medal, xp); setTimeout(checkBadges, 7500); } },
+}, (c, kmh) => {
+  // Pacer time: that flat-road effort on the challenge's real gradient.
+  const r = { massKg: settings.weightKg, bikeKg: 9 }, v = speedFor(powerFor(kmh / 3.6, 0, r), c.avg ?? 0, r);
+  return (c.m1 - c.m0) / Math.max(1, v);
 });
+// Your rival in a race, ridden on the road in gold.
+const rivalBot: Bot = { id: 900, name: "Rival", kit: 0xffc400, m: 0, v: 0, pace: 1, lat: 0.6, crank: 0, slot: 0 };
+let rivalOn = false;
 
 // Badges: announce any newly earned (after a saved ride or a completed challenge), one banner at a time.
 let knownBadges: Badge[] | null = null;
@@ -69,8 +79,11 @@ const engine = new RideEngine({
 const osm = new OsmTiles(14);
 // The skyline needs building heights, which only the z14 tiles carry; share one cache.
 const osmFar = osm;
-const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm, osmFar, pack: () => (settings.riders ? pack.bots : []),
-  marks: () => challenges().flatMap((c) => (c.kind === "hold" ? [c.m0] : [c.m0, c.m1])) });
+const road = new RoadView($<HTMLCanvasElement>("road"), { route: () => route, profile: () => profile, settings: () => settings, osm, osmFar, pack: () => [...(settings.riders ? pack.bots : []), ...(rivalOn ? [rivalBot] : [])],
+  marks: () => challenges().flatMap((c) => {
+    const what = c.kind === "climb" ? `CLIMB · ${(c.m1 - c.m0) >= 1000 ? ((c.m1 - c.m0) / 1000).toFixed(1) + " KM" : Math.round(c.m1 - c.m0) + " M"}` : c.kind === "sprint" ? `SPRINT · ${Math.round(c.m1 - c.m0)} M` : "HOLD IT · 60 S";
+    return c.kind === "hold" ? [{ m: c.m0, label: what, finish: false }] : [{ m: c.m0, label: what, finish: false }, { m: c.m1, label: "FINISH", finish: true }];
+  }) });
 const mapView = new MapView($("map"), () => settings);
 const audio = new RideAudio();
 audio.enabled = settings.sound;
@@ -414,28 +427,86 @@ document.addEventListener("el:sound", (e) => audio.setEnabled((e as CustomEvent<
 document.addEventListener("el:terrain", () => mapView.applyTerrain());
 
 // ===================== challenges =====================
-let chalStatus: ReturnType<ChallengeRunner["update"]>["status"] = null, lastTimer = 0;
+let chalStatus: ReturnType<ChallengeRunner["update"]>["status"] = null, lastTimer = 0, nextBeat = 0;
+const confetti = new Confetti($<HTMLCanvasElement>("confetti"));
+const MEDAL = { gold: ["🥇", "#ffc400", 3], silver: ["🥈", "#d8dde3", 2], bronze: ["🥉", "#e09a5a", 1] } as const;
+const kindName = (c: Challenge) => (c.kind === "climb" ? "Climb" : c.kind === "sprint" ? "Sprint" : "Hold");
+
+function countdown(n: number) {
+  const el = $("count");
+  el.textContent = n > 0 ? String(n) : "GO!";
+  el.classList.toggle("go", n === 0);
+  el.classList.remove("show"); void el.offsetWidth; el.classList.add("show");
+  audio.countdown(n);
+}
+
+function celebrate(medal: Medal, kind: string, time: string, note: string, xp: number) {
+  const [ico, col, lvl] = MEDAL[medal];
+  const m = $("medal");
+  m.style.setProperty("--medal", col);
+  $("medalIco").textContent = ico;
+  $("medalKind").textContent = `${kind} · ${medal}`;
+  $("medalTime").textContent = time;
+  $("medalNote").textContent = note;
+  // XP and level, counting this ride's distance too.
+  const km = rides.reduce((a, r) => a + r.dist, 0) / 1000 + engine.current.dist / 1000;
+  const L = engine.current.sim ? null : xpLevel(challengeStore.log(), km);
+  $("medalXp").textContent = engine.current.sim ? "Simulated · no XP" : `+${xp} XP`;
+  const bar = $("medalXpBar");
+  bar.style.width = L ? `${Math.max(0, ((L.into - xp) / L.need) * 100)}%` : "0";
+  $("medalLvl").textContent = L ? `Level ${L.level} · ${L.into} / ${L.need} XP` : "";
+  m.hidden = false;
+  requestAnimationFrame(() => requestAnimationFrame(() => { if (L) bar.style.width = `${(L.into / L.need) * 100}%`; }));
+  setTimeout(() => (m.hidden = true), 5200);
+  const fl = $("flash"); fl.classList.remove("on"); void fl.offsetWidth; fl.classList.add("on");
+  confetti.burst(lvl === 3 ? 260 : lvl === 2 ? 160 : 90, lvl === 3 ? ["#ffc400", "#fff3b0", "#ff8a3d", "#00732f", "#ffffff", "#ff0000"] : undefined);
+  audio.fanfare(lvl);
+  road.celebrate(4);
+}
+
 function challengeFrame(_dt: number, f: Frame) {
   // Time challenges by the ride clock, not frame time: right even when frames are slow or the app is in the background.
   const dt = Math.max(0, Math.min(5, f.timer - lastTimer));
   lastTimer = f.timer;
   const { events, status } = runner.update(dt, { pos: f.pos, kmh: f.kmh, rpm: f.rpm, riding: f.state === "riding" });
   chalStatus = status;
+  const live = status?.live;
+  // Rival on the road, racing you.
+  rivalOn = !!live?.rivalM;
+  if (live?.rivalM !== undefined) {
+    const was = rivalBot.m;
+    rivalBot.m = live.rivalM;
+    rivalBot.v = Math.max(0, Math.min(25, (rivalBot.m - was) / Math.max(1 / 60, _dt)));
+    rivalBot.crank += ((80 + rivalBot.v * 1.2) / 60) * TAU * _dt;
+  }
+  $("stage").classList.toggle("racing", !!live);
+  road.raceBoost = live && status!.c.kind !== "hold" ? 1 : 0;
+  // Heartbeat, quicker towards the finish.
+  if (live) {
+    const now = performance.now(), period = 1000 - live.urgency * 520;
+    if (now > nextBeat) { nextBeat = now + period; audio.pulse(live.urgency); }
+  }
   for (const e of events) {
-    const kind = e.c.kind === "climb" ? "Climb" : e.c.kind === "sprint" ? "Sprint" : "Hold";
+    const kind = kindName(e.c);
     if (e.type === "approach") {
-      const best = challengeStore.best(e.c.id);
-      showBanner(`${kind} in ${Math.round(e.dist)} m`, e.c.kind === "climb" ? `${e.c.name} · ${Math.round((e.c.avg ?? 0) * 100)} %` : e.c.kind === "sprint" ? e.c.name : "Hold it", e.target ?? (best !== null ? `Your best ${fmtSecs(best)}` : "First time: set a time to beat"), 4500);
-    } else if (e.type === "start") {
-      showBanner(kind, "Go!", e.target ?? e.c.name, 2500);
-      audio.chime();
+      const r = e.rival;
+      showBanner(`${kind} in ${Math.round(e.dist)} m`, e.c.kind === "climb" ? `${e.c.name} · ${Math.round((e.c.avg ?? 0) * 100)} %` : e.c.kind === "sprint" ? e.c.name : "Hold it",
+        e.target ?? (r ? (r.isBest ? `Beat your best · ${fmtSecs(r.time)}` : `Race ${r.name} · ${fmtSecs(r.time)}`) : ""), 4500);
+      audio.countdown(3);
+    } else if (e.type === "countdown") countdown(e.n);
+    else if (e.type === "start") {
+      countdown(0);
+      if (e.target) showBanner(kind, "Hold it!", e.target, 2500);
+    } else if (e.type === "overtake") {
+      if (e.ahead) { audio.whoosh(); toast(`You're ahead of ${rivalBot.name === "Rival" ? "your rival" : rivalBot.name}!`, 1800); }
+      else toast("Your rival's back in front — dig in!", 1800);
+      const r = $("race"); r.classList.remove("pulse"); void r.offsetWidth; r.classList.add("pulse");
     } else if (e.type === "finish") {
-      const d = e.best !== null ? e.time - e.best : 0;
-      showBanner(e.pr ? (e.best === null ? "Time set" : "New best!") : `${kind} done`, fmtSecs(e.time), e.best === null ? e.c.name : e.pr ? `${Math.abs(d).toFixed(1)} s faster than your best` : `Best ${fmtSecs(e.best)} · ${d.toFixed(1)} s slower`, 6000);
-      if (e.pr) audio.chime();
+      const r = e.rival, d = r ? e.time - r.time : 0;
+      const note = r ? (d <= 0 ? `${r.isBest ? "New best" : `Beat ${r.name}`} by ${Math.abs(d).toFixed(1)} s` : `${d.toFixed(1)} s behind ${r.isBest ? "your best" : r.name}`) : e.c.name;
+      celebrate(e.medal, kind, fmtSecs(e.time), note, e.xp);
     } else if (e.type === "done") {
-      showBanner("Hold complete", "Nailed it", `${e.target} for 60 s`, 5000);
-      audio.chime();
+      celebrate(e.medal, kind, "60 s", `${e.target}${e.medal === "gold" ? " · no breaks" : ""}`, e.xp);
     } else if (e.type === "fail") toast(`${kind} called off · ${e.why.toLowerCase()}`);
   }
 }
@@ -481,9 +552,25 @@ function hud(f: Frame, now: number) {
   else if (next) { $("packTxt").textContent = `${next.bot.name} ahead`; $("packVal").textContent = `${Math.round(next.gap)} m`; }
   const nb = draft > 0.02 ? pack.ahead(f.pos, 7) : next;
   if (nb) $("packDot").style.setProperty("--kit", "#" + nb.bot.kit.toString(16).padStart(6, "0"));
-  const cs = chalStatus, cc = $("chalChip");
-  cc.hidden = !cs;
-  if (cs) { $("chalTxt").textContent = cs.label; $("chalVal").textContent = cs.value; $("chalSub").textContent = cs.sub ?? ""; $("chalSub").hidden = !cs.sub; }
+  const cs = chalStatus, cc = $("chalChip"), lv = cs?.live, race = $("race");
+  cc.hidden = !cs || !!lv;
+  race.hidden = !lv;
+  if (lv && cs) {
+    race.classList.toggle("hold", cs.c.kind === "hold");
+    race.classList.toggle("off", lv.holdOn === false);
+    race.classList.toggle("ahead", lv.gap !== undefined && lv.gap < 0);
+    race.classList.toggle("behind", lv.gap !== undefined && lv.gap > 0);
+    $("raceName").textContent = cs.label;
+    $("raceGap").textContent = lv.gap !== undefined ? `${lv.gap <= 0 ? "−" : "+"}${Math.abs(lv.gap).toFixed(1)} s` : cs.value;
+    $("raceFill").style.width = `${(lv.progress * 100).toFixed(1)}%`;
+    $("raceYou").style.left = `${(lv.progress * 100).toFixed(1)}%`;
+    const rv = $("raceRival");
+    rv.hidden = lv.rivalM === undefined;
+    if (lv.rivalM !== undefined) rv.style.left = `${Math.min(100, ((lv.rivalM - (route.loop ? Math.floor(lv.rivalM / route.total) * route.total : 0) - cs.c.m0) / (cs.c.m1 - cs.c.m0)) * 100).toFixed(1)}%`;
+    $("raceSub").textContent = cs.sub ?? "";
+    $("raceVs").textContent = lv.gap !== undefined ? (lv.gap <= 0 ? "Ahead of rival" : "Behind rival") : cs.value;
+  }
+  if (cs && !lv) { $("chalTxt").textContent = cs.label; $("chalVal").textContent = cs.value; $("chalSub").textContent = cs.sub ?? ""; $("chalSub").hidden = !cs.sub; }
   $("simChip").hidden = !f.sim;
   $("banner").classList.toggle("on", now < bannerUntil);
   // next stop card (every 2 s: includes a climb calculation)
