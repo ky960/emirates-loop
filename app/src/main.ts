@@ -4,7 +4,7 @@ import { climbBetween, demProfile, gradeAt, flatProfile, gpxProfile, processProf
 import { RideEngine, type Frame, type RideState } from "./ride/engine";
 import { Ghost, pickBest } from "./ride/ghost";
 import { Pack } from "./ride/pack";
-import { ChallengeRunner, fmtSecs, LANDMARK_XP, landmarkLog, localChallengeStore, planChallenges, recordLandmark, xpLevel, type Challenge, type Medal } from "./ride/challenges";
+import { ChallengeRunner, fmtSecs, LANDMARK_XP, landmarkLog, localChallengeStore, planChallenges, recordLandmark, type Challenge, type Medal } from "./ride/challenges";
 import { powerFor, speedFor } from "./physics";
 import type { Bot } from "./ride/pack";
 import { Confetti } from "./ui/confetti";
@@ -20,6 +20,7 @@ import { loadRides, loadStartAt, resumeOf, sameRoute, saveRide, saveStartAt } fr
 import { loadSettings, maxHrOf, saveSettings, type Camera } from "./store/settings";
 import { drawStageProfile } from "./ui/charts";
 import { $, html, raw, sheet, toast } from "./ui/dom";
+import { icon } from "./ui/icons";
 import { renderHistory } from "./ui/history";
 import { renderSettings } from "./ui/settings";
 import { fmtDuration, TAU } from "./util";
@@ -496,41 +497,35 @@ document.addEventListener("el:hero", () => applyHero());
 // ===================== challenges =====================
 let chalStatus: ReturnType<ChallengeRunner["update"]>["status"] = null, lastTimer = 0, nextBeat = 0;
 const confetti = new Confetti($<HTMLCanvasElement>("confetti"));
-const MEDAL = { gold: ["🥇", "#ffc400", 3], silver: ["🥈", "#d8dde3", 2], bronze: ["🥉", "#e09a5a", 1] } as const;
+const MEDAL = { gold: ["Gold", "#E3C068", 3], silver: ["Silver", "#C9CED6", 2], bronze: ["Bronze", "#C98C5A", 1] } as const;
+/** Target line for the segment that is coming up or running (shown under its name). */
+let segNote = "", segAvg = "";
 const kindName = (c: Challenge) => (c.kind === "climb" ? "Climb" : c.kind === "sprint" ? "Sprint" : "Hold");
 
 function countdown(n: number) {
   const el = $("count");
-  el.textContent = n > 0 ? String(n) : "GO!";
+  el.textContent = n > 0 ? `Starts in ${n}` : "Go";
   el.classList.toggle("go", n === 0);
   el.classList.remove("show"); void el.offsetWidth; el.classList.add("show");
   audio.countdown(n);
 }
 
-function celebrate(medal: Medal, kind: string, time: string, note: string, xp: number) {
-  const [ico, col, lvl] = MEDAL[medal];
+/** Result of a segment: a short, quiet card with the time and how it compares. */
+function celebrate(medal: Medal, kind: string, time: string, note: string) {
+  const [label, col, lvl] = MEDAL[medal];
   const m = $("medal");
   m.style.setProperty("--medal", col);
-  $("medalIco").textContent = ico;
-  $("medalKind").textContent = `${kind} · ${medal}`;
+  $("medalKind").textContent = `${kind} · ${label}`;
   $("medalTime").textContent = time;
-  $("medalNote").textContent = note;
-  // XP and level, counting this ride's distance too.
-  const km = rides.reduce((a, r) => a + r.dist, 0) / 1000 + engine.current.dist / 1000;
-  const L = engine.current.sim ? null : xpLevel(challengeStore.log(), km, landmarkLog().length);
-  $("medalXp").textContent = engine.current.sim ? "Simulated · no XP" : `+${xp} XP`;
-  const bar = $("medalXpBar");
-  bar.style.width = L ? `${Math.max(0, ((L.into - xp) / L.need) * 100)}%` : "0";
-  $("medalLvl").textContent = L ? `Level ${L.level} · ${L.into} / ${L.need} XP` : "";
+  $("medalNote").textContent = engine.current.sim ? `${note} · simulated, not saved` : note;
   m.hidden = false;
-  requestAnimationFrame(() => requestAnimationFrame(() => { if (L) bar.style.width = `${(L.into / L.need) * 100}%`; }));
-  setTimeout(() => (m.hidden = true), 5200);
-  const fl = $("flash"); fl.classList.remove("on"); void fl.offsetWidth; fl.classList.add("on");
-  confetti.burst(lvl === 3 ? 260 : lvl === 2 ? 160 : 90, lvl === 3 ? ["#ffc400", "#fff3b0", "#ff8a3d", "#00732f", "#ffffff", "#ff0000"] : undefined);
+  clearTimeout(resTimer);
+  resTimer = setTimeout(() => (m.hidden = true), 4500);
   if (settings.hero) { burst(medal === "gold" ? "KAPOW!" : medal === "silver" ? "WHAM!" : "BAM!"); setTimeout(() => burst(), 650); }
   audio.fanfare(lvl);
   road.celebrate(4);
 }
+let resTimer: ReturnType<typeof setTimeout> | undefined;
 
 function challengeFrame(_dt: number, f: Frame) {
   // Time challenges by the ride clock, not frame time: right even when frames are slow or the app is in the background.
@@ -558,27 +553,27 @@ function challengeFrame(_dt: number, f: Frame) {
   }
   for (const e of events) {
     const kind = kindName(e.c);
+    if (e.type === "finish" || e.type === "done" || e.type === "fail") segNote = segAvg = "";
     if (e.type === "approach") {
       const r = e.rival;
-      showBanner(`${kind} in ${Math.round(e.dist)} m`, e.c.kind === "climb" ? `${e.c.name} · ${Math.round((e.c.avg ?? 0) * 100)} %` : e.c.kind === "sprint" ? e.c.name : "Hold it",
-        e.target ?? (r ? (r.isBest ? `Beat your best · ${fmtSecs(r.time)}` : `Race ${r.name} · ${fmtSecs(r.time)}`) : ""), 4500);
+      segAvg = e.c.kind === "climb" ? `${Math.round((e.c.avg ?? 0) * 100)} % avg` : "";
+      segNote = [segAvg, e.target ?? (r ? (r.isBest ? `Your best ${fmtSecs(r.time)}` : `${r.name} ${fmtSecs(r.time)}`) : "")].filter(Boolean).join(" · ");
       audio.countdown(3);
     } else if (e.type === "countdown") countdown(e.n);
     else if (e.type === "start") {
       countdown(0);
       rivalBot.name = e.rival ? (e.rival.isBest ? (settings.hero ? "The Mirage" : "Rival") : e.rival.name) : "Rival";
-      if (e.target) showBanner(kind, "Hold it!", e.target, 2500);
+      segNote = e.target ?? "";
     } else if (e.type === "overtake") {
       const v = settings.hero ? villainOf(rivalBot.name) : undefined;
-      if (e.ahead) { audio.whoosh(); if (settings.hero) burst(); toast(v ? `${v.name}: “${pick(v.beaten)}”` : `You're ahead of ${rivalBot.name === "Rival" ? "your rival" : rivalBot.name}!`, 2200); }
-      else toast(v ? `${v.name}: “${pick(v.taunts)}”` : "Your rival's back in front — dig in!", 2200);
-      const r = $("race"); r.classList.remove("pulse"); void r.offsetWidth; r.classList.add("pulse");
+      if (e.ahead) { audio.whoosh(); if (settings.hero) burst(); if (v) toast(`${v.name}: “${pick(v.beaten)}”`, 2200); }
+      else if (v) toast(`${v.name}: “${pick(v.taunts)}”`, 2200);
     } else if (e.type === "finish") {
       const r = e.rival, d = r ? e.time - r.time : 0;
       const note = r ? (d <= 0 ? `${r.isBest ? "New best" : `Beat ${r.name}`} by ${Math.abs(d).toFixed(1)} s` : `${d.toFixed(1)} s behind ${r.isBest ? "your best" : r.name}`) : e.c.name;
-      celebrate(e.medal, kind, fmtSecs(e.time), note, e.xp);
+      celebrate(e.medal, kind, fmtSecs(e.time), note);
     } else if (e.type === "done") {
-      celebrate(e.medal, kind, "60 s", `${e.target}${e.medal === "gold" ? " · no breaks" : ""}`, e.xp);
+      celebrate(e.medal, kind, "60 s", `${e.target}${e.medal === "gold" ? " · no breaks" : ""}`);
     } else if (e.type === "fail") toast(`${kind} called off · ${e.why.toLowerCase()}`);
   }
 }
@@ -632,17 +627,18 @@ function hud(f: Frame, now: number) {
     race.classList.toggle("off", lv.holdOn === false);
     race.classList.toggle("ahead", lv.gap !== undefined && lv.gap < 0);
     race.classList.toggle("behind", lv.gap !== undefined && lv.gap > 0);
+    if (race.dataset.kind !== cs.c.kind) { race.dataset.kind = cs.c.kind; $("raceIco").innerHTML = icon(cs.c.kind === "climb" ? "mountain" : cs.c.kind === "sprint" ? "bolt" : "gauge", 16); }
     $("raceName").textContent = cs.label;
     $("raceGap").textContent = lv.gap !== undefined ? `${lv.gap <= 0 ? "−" : "+"}${Math.abs(lv.gap).toFixed(1)} s` : cs.value;
     $("raceFill").style.width = `${(lv.progress * 100).toFixed(1)}%`;
-    $("raceYou").style.left = `${(lv.progress * 100).toFixed(1)}%`;
     const rv = $("raceRival");
     rv.hidden = lv.rivalM === undefined;
     if (lv.rivalM !== undefined) rv.style.left = `${Math.min(100, ((lv.rivalM - (route.loop ? Math.floor(lv.rivalM / route.total) * route.total : 0) - cs.c.m0) / (cs.c.m1 - cs.c.m0)) * 100).toFixed(1)}%`;
     $("raceSub").textContent = cs.sub ?? "";
-    $("raceVs").textContent = lv.gap !== undefined ? (lv.gap <= 0 ? "Ahead of rival" : "Behind rival") : cs.value;
+    $("raceVs").textContent = lv.gap !== undefined ? (rivalBot.name === "Rival" || rivalBot.name === "The Mirage" ? "vs best" : `vs ${rivalBot.name}`) : cs.c.kind === "hold" ? "left" : "";
+    $("raceAux").textContent = segAvg;
   }
-  if (cs && !lv) { $("chalTxt").textContent = cs.label; $("chalVal").textContent = cs.value; $("chalSub").textContent = cs.sub ?? ""; $("chalSub").hidden = !cs.sub; }
+  if (cs && !lv) { $("chalTxt").textContent = cs.label; $("chalVal").textContent = cs.value; const sub = cs.sub ?? segNote; $("chalSub").textContent = sub; $("chalSub").hidden = !sub; }
   $("simChip").hidden = !f.sim;
   $("banner").classList.toggle("on", now < bannerUntil);
   // next stop card (every 2 s: includes a climb calculation)

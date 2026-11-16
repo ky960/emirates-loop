@@ -1,6 +1,7 @@
 import { eleAt, type ElevationProfile } from "../elevation";
 import type { Leg, Route } from "../route";
 import { wrapM } from "../route";
+import type { FitnessPoint } from "../ride/fitness";
 import type { RideRecord } from "../ride/types";
 import { cssVar } from "./dom";
 
@@ -84,7 +85,7 @@ export function drawRideChart(cv: HTMLCanvasElement, r: RideRecord) {
     }
     g.strokeStyle = color; g.lineWidth = width; g.lineJoin = "round"; g.stroke();
   };
-  line(v, vMax, 0, cssVar("--dune"), 2);
+  line(v, vMax, 0, cssVar("--hx-accent") || cssVar("--dune"), 2);
   const hasHr = s.h.some((x) => x > 0);
   let hLo = 0, hHi = 0;
   if (hasHr) {
@@ -101,7 +102,7 @@ export function drawRideChart(cv: HTMLCanvasElement, r: RideRecord) {
   for (let k = stepKm; k * 1000 < maxD; k += stepKm) g.fillText(`${k} km`, X(k * 1000), h - 6);
 }
 
-/** Distance per week, last `weeks` weeks (Monday-based). */
+/** Distance per week, last `weeks` weeks (Monday-based). This week in the accent colour. */
 export function drawWeekly(cv: HTMLCanvasElement, rides: RideRecord[], weeks = 12) {
   const { g, w, h } = fit(cv);
   g.clearRect(0, 0, w, h);
@@ -112,18 +113,44 @@ export function drawWeekly(cv: HTMLCanvasElement, rides: RideRecord[], weeks = 1
     const k = Math.floor((monday + WEEK - r.start) / WEEK);
     if (k >= 0 && k < weeks) km[weeks - 1 - k] += r.dist / 1000;
   }
-  const max = Math.max(20, ...km) * 1.15, padB = 20, bw = (w / weeks) * 0.62;
-  g.font = "600 11px Barlow, sans-serif"; g.textAlign = "center";
+  const max = Math.max(20, ...km) * 1.2, padB = 22, top = 16, bw = Math.min(40, (w / weeks) * 0.6);
+  const Y = (v: number) => h - padB - (v / max) * (h - padB - top);
+  grid(g, w, h - padB, top);
+  g.font = "500 11px Inter, Barlow, sans-serif"; g.textAlign = "center";
   km.forEach((v, i) => {
-    const x = (i + 0.5) * (w / weeks), bh = (v / max) * (h - padB - 14);
-    g.fillStyle = i === weeks - 1 ? cssVar("--dune") : cssVar("--surface-2");
-    const y = h - padB - bh;
-    g.beginPath(); g.roundRect(x - bw / 2, y, bw, Math.max(2, bh), 4); g.fill();
-    if (v > 0) { g.fillStyle = cssVar("--fg"); g.fillText(v.toFixed(0), x, y - 4); }
-    if (i % 2 === (weeks - 1) % 2) {
-      const d = new Date(monday - (weeks - 1 - i) * WEEK);
+    const x = (i + 0.5) * (w / weeks), y = Y(v), last = i === weeks - 1;
+    g.fillStyle = last ? cssVar("--hx-accent") : cssVar("--hx-bar");
+    g.beginPath(); g.roundRect(x - bw / 2, Math.min(y, h - padB - 2), bw, Math.max(2, h - padB - y), 3); g.fill();
+    if (last && v > 0) { g.fillStyle = cssVar("--fg"); g.fillText(v.toFixed(0), x, y - 6); }
+    if (i % 4 === 0 || last) {
       g.fillStyle = cssVar("--muted");
-      g.fillText(d.toLocaleDateString(undefined, { day: "numeric", month: "short" }), x, h - 5);
+      g.fillText(last ? "This week" : new Date(monday - (weeks - 1 - i) * WEEK).toLocaleDateString(undefined, { day: "numeric", month: "short" }), x, h - 5);
     }
   });
+}
+
+/** Fitness and fatigue lines over the last weeks. */
+export function drawFitness(cv: HTMLCanvasElement, pts: FitnessPoint[]) {
+  const { g, w, h } = fit(cv);
+  g.clearRect(0, 0, w, h);
+  const padB = 22, top = 12, padR = 8;
+  const max = Math.max(10, ...pts.map((p) => Math.max(p.fitness, p.fatigue))) * 1.15;
+  const X = (i: number) => (i / Math.max(1, pts.length - 1)) * (w - padR), Y = (v: number) => h - padB - (v / max) * (h - padB - top);
+  grid(g, w, h - padB, top);
+  const line = (k: "fitness" | "fatigue", color: string, width: number) => {
+    g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(X(i), Y(p[k])) : g.moveTo(X(i), Y(p[k]))));
+    g.strokeStyle = color; g.lineWidth = width; g.lineJoin = "round"; g.stroke();
+  };
+  line("fatigue", cssVar("--hx-fatigue"), 1.8);
+  line("fitness", cssVar("--hx-fitness"), 2.5);
+  const last = pts[pts.length - 1];
+  if (last) { g.beginPath(); g.arc(X(pts.length - 1), Y(last.fitness), 4, 0, Math.PI * 2); g.fillStyle = cssVar("--hx-fitness"); g.fill(); }
+  g.font = "500 11px Inter, Barlow, sans-serif"; g.fillStyle = cssVar("--muted"); g.textAlign = "center";
+  for (let i = 0; i < pts.length; i += 28) g.fillText(new Date(pts[i].day).toLocaleDateString(undefined, { day: "numeric", month: "short" }), Math.max(24, X(i)), h - 5);
+  g.textAlign = "right"; g.fillText("Today", w - padR, h - 5);
+}
+
+function grid(g: CanvasRenderingContext2D, w: number, bottom: number, top: number) {
+  g.strokeStyle = cssVar("--hx-grid"); g.lineWidth = 1;
+  for (let k = 0; k <= 3; k++) { const y = Math.round(top + ((bottom - top) * k) / 3) + 0.5; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
 }

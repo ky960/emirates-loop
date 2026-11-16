@@ -10,7 +10,7 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600;700&family=Inter:wght@400;500;600&family=Inter+Tight:wght@500;600&display=swap">
   <title>Emirates Loop</title>
 </head>
 <body>
@@ -54,19 +54,20 @@
           <button data-cam="loop" aria-pressed="false">Loop</button>
         </div>
 
-        <div class="race" id="race" hidden>
-          <div class="race-top"><span id="raceName"></span><b id="raceGap"></b></div>
-          <div class="race-track"><div class="race-fill" id="raceFill"></div><i class="race-you" id="raceYou"></i><i class="race-rival" id="raceRival"></i></div>
-          <div class="race-sub"><span id="raceSub"></span><span id="raceVs"></span></div>
+        <div class="segc" id="race" hidden>
+          <div class="segc-top">
+            <span class="segc-name"><span class="segc-ico" id="raceIco"></span><span id="raceName"></span></span>
+            <span class="segc-gap"><b id="raceGap"></b><small id="raceVs"></small></span>
+          </div>
+          <div class="segc-track"><div class="segc-fill" id="raceFill"></div><i class="segc-mark" id="raceRival"></i></div>
+          <div class="segc-sub"><span id="raceSub"></span><span id="raceAux"></span></div>
         </div>
-        <div class="count" id="count" aria-live="assertive"></div>
+        <div class="segcount" id="count" aria-live="assertive"></div>
         <canvas class="confetti" id="confetti"></canvas>
-        <div class="medal" id="medal" hidden>
-          <div class="medal-ico" id="medalIco"></div>
+        <div class="segres" id="medal" hidden>
           <small id="medalKind"></small>
           <strong id="medalTime"></strong>
           <span id="medalNote"></span>
-          <div class="xp"><b id="medalXp"></b><div class="xpbar"><div id="medalXpBar"></div></div><small id="medalLvl"></small></div>
         </div>
         <div class="flash" id="flash"></div>
         <div class="comic" id="comic" aria-hidden="true"></div>
